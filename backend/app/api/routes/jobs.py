@@ -1,0 +1,201 @@
+from __future__ import annotations
+
+import json
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.api.deps import get_current_user
+from app.db.session import get_db
+from app.models import (
+    Job,
+    JobEvaluation,
+    ModelProviderConfig,
+    ResumeFile,
+    ResumeVersion,
+    User,
+    UserProfile,
+)
+from app.schemas import CreateJobEvaluationRequest, JobEvaluationResponse, JobResponse
+from app.services.job_evaluation import build_job_evaluation_report
+
+router = APIRouter(prefix="/jobs", tags=["jobs"])
+DbSession = Annotated[Session, Depends(get_db)]
+CurrentUser = Annotated[User, Depends(get_current_user)]
+
+
+@router.get("", response_model=list[JobResponse])
+def list_jobs(
+    current_user: CurrentUser,
+    db: DbSession,
+) -> list[Job]:
+    return list(
+        db.scalars(
+            select(Job).where(Job.user_id == current_user.id).order_by(Job.created_at.desc())
+        ).all()
+    )
+
+
+@router.get("/{job_id}/evaluations", response_model=list[JobEvaluationResponse])
+def list_job_evaluations(
+    job_id: str,
+    current_user: CurrentUser,
+    db: DbSession,
+) -> list[JobEvaluationResponse]:
+    _get_owned_job(job_id, current_user.id, db)
+    evaluations = db.scalars(
+        select(JobEvaluation)
+        .where(JobEvaluation.user_id == current_user.id, JobEvaluation.job_id == job_id)
+        .order_by(JobEvaluation.created_at.desc())
+    ).all()
+    return [_evaluation_response(evaluation, db) for evaluation in evaluations]
+
+
+@router.post("/{job_id}/evaluations", response_model=JobEvaluationResponse)
+def create_job_evaluation(
+    job_id: str,
+    payload: CreateJobEvaluationRequest,
+    current_user: CurrentUser,
+    db: DbSession,
+) -> JobEvaluationResponse:
+    job = _get_owned_job(job_id, current_user.id, db)
+    resume_version = _get_resume_version(payload.resume_version_id, current_user.id, db)
+    model_provider = _get_model_provider(payload.model_provider_id, current_user.id, db)
+    profile = db.scalar(select(UserProfile).where(UserProfile.user_id == current_user.id))
+
+    report = build_job_evaluation_report(job, resume_version, profile)
+    evaluation = JobEvaluation(
+        user_id=current_user.id,
+        job_id=job.id,
+        resume_version_id=resume_version.id,
+        model_provider_id=model_provider.id if model_provider else None,
+        framework_version=report["framework_version"],
+        prompt_version=report["prompt_version"],
+        raw_weighted_score=report["raw_weighted_score"],
+        final_score=report["final_score"],
+        recommendation=report["recommendation"],
+        one_sentence_reason=report["one_sentence_reason"],
+        language_gate_triggered=report["language_gate_triggered"],
+        dealbreakers_hit=_dump(report["dealbreakers_hit"]),
+        dimensions_json=_dump(report["dimensions"]),
+        highlights_json=_dump(report["highlights"]),
+        risks_and_gaps_json=_dump(report["risks_and_gaps"]),
+        salary_benchmark_json=_dump(report["salary_benchmark"]),
+        evidence_json=_dump(report["evidence"]),
+        resume_focus_suggestions_json=_dump(report["resume_focus_suggestions"]),
+        honest_gap_statements_json=_dump(report["honest_gap_statements"]),
+        raw_report_json=_dump(report),
+    )
+    db.add(evaluation)
+    db.commit()
+    db.refresh(evaluation)
+    return _evaluation_response(evaluation, db)
+
+
+def _get_owned_job(job_id: str, user_id: str, db: Session) -> Job:
+    job = db.scalar(select(Job).where(Job.id == job_id, Job.user_id == user_id))
+    if job is None:
+        raise HTTPException(status_code=404, detail="未找到该岗位。")
+    return job
+
+
+def _get_resume_version(
+    resume_version_id: str | None,
+    user_id: str,
+    db: Session,
+) -> ResumeVersion:
+    if resume_version_id:
+        resume_version = db.scalar(
+            select(ResumeVersion).where(
+                ResumeVersion.id == resume_version_id,
+                ResumeVersion.user_id == user_id,
+            )
+        )
+        if resume_version is None:
+            raise HTTPException(status_code=404, detail="未找到该简历版本。")
+        return resume_version
+
+    default_resume = db.scalar(
+        select(ResumeFile).where(ResumeFile.user_id == user_id, ResumeFile.is_default)
+    )
+    if default_resume is None:
+        raise HTTPException(status_code=422, detail="请先上传或设置默认简历后再进行 AI 测评。")
+    resume_version = db.scalar(
+        select(ResumeVersion)
+        .where(
+            ResumeVersion.user_id == user_id,
+            ResumeVersion.resume_file_id == default_resume.id,
+        )
+        .order_by(ResumeVersion.version_no.desc(), ResumeVersion.created_at.desc())
+    )
+    if resume_version is None:
+        raise HTTPException(status_code=422, detail="默认简历没有可用版本，请重新上传简历。")
+    return resume_version
+
+
+def _get_model_provider(
+    model_provider_id: str | None,
+    user_id: str,
+    db: Session,
+) -> ModelProviderConfig | None:
+    if model_provider_id:
+        model_provider = db.scalar(
+            select(ModelProviderConfig).where(
+                ModelProviderConfig.id == model_provider_id,
+                ModelProviderConfig.user_id == user_id,
+            )
+        )
+        if model_provider is None:
+            raise HTTPException(status_code=404, detail="未找到该模型配置。")
+        return model_provider
+    return db.scalar(
+        select(ModelProviderConfig)
+        .where(ModelProviderConfig.user_id == user_id)
+        .order_by(ModelProviderConfig.updated_at.desc())
+    )
+
+
+def _evaluation_response(evaluation: JobEvaluation, db: Session) -> JobEvaluationResponse:
+    resume_version = db.scalar(
+        select(ResumeVersion).where(ResumeVersion.id == evaluation.resume_version_id)
+    )
+    raw_report = _load(evaluation.raw_report_json, {})
+    return JobEvaluationResponse(
+        id=evaluation.id,
+        job_id=evaluation.job_id,
+        resume_version_id=evaluation.resume_version_id,
+        resume_title=resume_version.title if resume_version else None,
+        model_provider_id=evaluation.model_provider_id,
+        framework_version=evaluation.framework_version,
+        prompt_version=evaluation.prompt_version,
+        raw_weighted_score=evaluation.raw_weighted_score,
+        final_score=evaluation.final_score,
+        recommendation=evaluation.recommendation,
+        one_sentence_reason=evaluation.one_sentence_reason,
+        language_gate_triggered=evaluation.language_gate_triggered,
+        dealbreakers_hit=_load(evaluation.dealbreakers_hit, []),
+        dimensions=_load(evaluation.dimensions_json, {}),
+        highlights=_load(evaluation.highlights_json, []),
+        risks_and_gaps=_load(evaluation.risks_and_gaps_json, []),
+        jd_requirements=raw_report.get("jd_requirements", {}),
+        salary_benchmark=_load(evaluation.salary_benchmark_json, {}),
+        evidence=_load(evaluation.evidence_json, []),
+        resume_focus_suggestions=_load(evaluation.resume_focus_suggestions_json, []),
+        honest_gap_statements=_load(evaluation.honest_gap_statements_json, []),
+        created_at=evaluation.created_at,
+    )
+
+
+def _dump(value) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _load(value: str | None, fallback):
+    if not value:
+        return fallback
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return fallback

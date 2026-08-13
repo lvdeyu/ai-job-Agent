@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "ai-job-AGENT Boss Collector",
+  "version": "0.1.0",
+  "description": "Collect visible Boss job cards for ai-job-AGENT local development.",
+  "permissions": ["tabs", "scripting"],
+  "host_permissions": ["https://www.zhipin.com/*", "http://127.0.0.1:18000/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.zhipin.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["http://127.0.0.1:15173/*", "http://localhost:15173/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
