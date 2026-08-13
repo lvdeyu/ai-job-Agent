@@ -35,10 +35,22 @@ class ResumeVersion(Base):
         ForeignKey("resume_files.id", ondelete="CASCADE"),
         nullable=False,
     )
+    source_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("resume_versions.id", ondelete="SET NULL")
+    )
+    job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.id", ondelete="SET NULL"))
+    source_type: Mapped[str] = mapped_column(String(30), nullable=False, default="uploaded")
     version_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     title: Mapped[str] = mapped_column(String(120), nullable=False)
     extracted_text: Mapped[str] = mapped_column(Text, nullable=False)
     structured_summary: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
 
     resume_file = relationship("ResumeFile", back_populates="versions")
+    source_version = relationship("ResumeVersion", remote_side=[id])
+    job = relationship("Job")

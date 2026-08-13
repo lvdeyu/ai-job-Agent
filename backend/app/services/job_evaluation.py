@@ -164,7 +164,7 @@ def build_job_evaluation_report(
         dealbreakers_hit,
         language_gaps,
     )
-    evidence = _build_evidence(job, jd_requirements)
+    evidence = _build_evidence(job, resume_version, jd_requirements)
     salary_benchmark = _salary_benchmark(job.salary, profile)
 
     one_sentence_reason = _one_sentence_reason(
@@ -179,6 +179,7 @@ def build_job_evaluation_report(
     return {
         "framework_version": "v1",
         "prompt_version": "local-rule-v1",
+        "output_schema_version": "evaluation-json-v1",
         "raw_weighted_score": raw_weighted_score,
         "final_score": round(final_score, 1),
         "recommendation": recommendation,
@@ -636,9 +637,10 @@ def _build_honest_gap_statements(
     return statements
 
 
-def _build_evidence(job: Any, jd_requirements: dict[str, Any]) -> list[str]:
+def _build_evidence(job: Any, resume_version: Any, jd_requirements: dict[str, Any]) -> list[str]:
     evidence = [
         f"岗位：{job.company} · {job.title}",
+        f"简历版本：{getattr(resume_version, 'title', '') or resume_version.id}",
     ]
     if job.salary:
         evidence.append(f"薪资字段：{job.salary}")

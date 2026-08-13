@@ -71,6 +71,11 @@ interface ResumeVersion {
   title: string;
   version_no: number;
   extracted_text: string;
+  source_type: "uploaded" | "job_copy";
+  source_version_id?: string;
+  job_id?: string;
+  created_at: string;
+  updated_at?: string;
 }
 
 interface ResumeFile {
@@ -121,6 +126,7 @@ interface JobEvaluation {
   resume_title?: string;
   framework_version: string;
   prompt_version: string;
+  output_schema_version: string;
   raw_weighted_score: number;
   final_score: number;
   recommendation: string;
@@ -294,7 +300,14 @@ export function App() {
   const [collecting, setCollecting] = useState(false);
   const [collectionSession, setCollectionSession] = useState<JobCollectionSession | null>(null);
   const [evaluationsByJobId, setEvaluationsByJobId] = useState<Record<string, JobEvaluation>>({});
+  const [evaluationHistoriesByJobId, setEvaluationHistoriesByJobId] = useState<Record<string, JobEvaluation[]>>({});
   const [evaluatingJobId, setEvaluatingJobId] = useState<string | null>(null);
+  const [selectedResumeVersionByJobId, setSelectedResumeVersionByJobId] = useState<Record<string, string>>({});
+  const [resumeVersionDrafts, setResumeVersionDrafts] = useState<
+    Record<string, { title: string; extracted_text: string }>
+  >({});
+  const [copyingResumeForJobId, setCopyingResumeForJobId] = useState<string | null>(null);
+  const [savingResumeVersionId, setSavingResumeVersionId] = useState<string | null>(null);
   const [historyPage, setHistoryPage] = useState(1);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyData, setHistoryData] = useState<JobCollectionHistoryPage | null>(null);
@@ -339,6 +352,14 @@ export function App() {
   );
   const displayedJobs = collectionSession?.jobs ?? [];
   const displayedJobIds = displayedJobs.map((job) => job.id).join("|");
+  const allResumeVersions = useMemo(
+    () => resumes.flatMap((resume) => resume.versions.map((version) => ({ ...version, resumeFileId: resume.id }))),
+    [resumes]
+  );
+  const defaultResumeVersion = useMemo(() => {
+    const defaultResume = resumes.find((resume) => resume.is_default);
+    return defaultResume?.versions[defaultResume.versions.length - 1] ?? allResumeVersions[0];
+  }, [allResumeVersions, resumes]);
   const historyPageIds = historyData?.items.map((item) => item.id) ?? [];
   const selectedHistoryIdsOnPage = historyPageIds.filter((id) => selectedHistoryIds.includes(id));
   const isHistoryPageFullySelected =
@@ -578,6 +599,7 @@ export function App() {
     setCollecting(true);
     setCollectionSession(null);
     setEvaluationsByJobId({});
+    setEvaluationHistoriesByJobId({});
     setMessage(null);
     try {
       const extension = await pingExtension();
@@ -952,26 +974,45 @@ export function App() {
       jobList.map(async (job) => {
         try {
           const response = await api.get<JobEvaluation[]>(`/jobs/${job.id}/evaluations`);
-          return [job.id, response.data[0]] as const;
+          return [job.id, response.data] as const;
         } catch {
-          return [job.id, undefined] as const;
+          return [job.id, [] as JobEvaluation[]] as const;
         }
       })
     );
+    setEvaluationHistoriesByJobId((previous) => {
+      const next = { ...previous };
+      for (const [jobId, evaluations] of results) {
+        next[jobId] = evaluations;
+      }
+      return next;
+    });
     setEvaluationsByJobId((previous) => {
       const next = { ...previous };
-      for (const [jobId, evaluation] of results) {
-        if (evaluation) next[jobId] = evaluation;
+      for (const [jobId, evaluations] of results) {
+        if (evaluations[0]) next[jobId] = evaluations[0];
+        else delete next[jobId];
       }
       return next;
     });
   }
 
-  async function evaluateJob(jobId: string) {
+  async function evaluateJob(jobId: string, resumeVersionId?: string) {
+    const selectedVersionId = resumeVersionId ?? getSelectedResumeVersion(jobId)?.id;
     setEvaluatingJobId(jobId);
     try {
-      const response = await api.post<JobEvaluation>(`/jobs/${jobId}/evaluations`, {});
+      const response = await api.post<JobEvaluation>(
+        `/jobs/${jobId}/evaluations`,
+        selectedVersionId ? { resume_version_id: selectedVersionId } : {}
+      );
       setEvaluationsByJobId((previous) => ({ ...previous, [jobId]: response.data }));
+      setEvaluationHistoriesByJobId((previous) => ({
+        ...previous,
+        [jobId]: [response.data, ...(previous[jobId] ?? [])]
+      }));
+      if (selectedVersionId) {
+        setSelectedResumeVersionByJobId((previous) => ({ ...previous, [jobId]: selectedVersionId }));
+      }
       setMessage({
         type: "success",
         text: `AI 测评完成：${response.data.final_score.toFixed(1)}/100，建议：${response.data.recommendation}`
@@ -983,11 +1024,103 @@ export function App() {
     }
   }
 
+  async function copyJobSpecificResumeVersion(job: Job) {
+    const sourceVersion = getSelectedResumeVersion(job.id) ?? defaultResumeVersion;
+    if (!sourceVersion) {
+      setMessage({ type: "error", text: "请先上传或设置默认简历后再复制岗位专属版本。" });
+      return;
+    }
+    setCopyingResumeForJobId(job.id);
+    try {
+      const response = await api.post<ResumeVersion>("/resumes/versions/job-specific", {
+        job_id: job.id,
+        source_resume_version_id: sourceVersion.id
+      });
+      setSelectedResumeVersionByJobId((previous) => ({ ...previous, [job.id]: response.data.id }));
+      setResumeVersionDrafts((previous) => ({
+        ...previous,
+        [response.data.id]: {
+          title: response.data.title,
+          extracted_text: response.data.extracted_text
+        }
+      }));
+      await refreshWorkspace();
+      setMessage({ type: "success", text: "已复制岗位专属简历版本，可以手动编辑后重新评测。" });
+    } catch (error) {
+      setMessage({ type: "error", text: errorMessage(error) });
+    } finally {
+      setCopyingResumeForJobId(null);
+    }
+  }
+
+  async function saveResumeVersion(version: ResumeVersion) {
+    const draft = resumeVersionDrafts[version.id] ?? {
+      title: version.title,
+      extracted_text: version.extracted_text
+    };
+    setSavingResumeVersionId(version.id);
+    try {
+      const response = await api.patch<ResumeVersion>(`/resumes/versions/${version.id}`, draft);
+      setResumeVersionDrafts((previous) => ({
+        ...previous,
+        [version.id]: {
+          title: response.data.title,
+          extracted_text: response.data.extracted_text
+        }
+      }));
+      await refreshWorkspace();
+      setMessage({ type: "success", text: "岗位专属简历版本已保存。" });
+    } catch (error) {
+      setMessage({ type: "error", text: errorMessage(error) });
+    } finally {
+      setSavingResumeVersionId(null);
+    }
+  }
+
+  function updateResumeVersionDraft(version: ResumeVersion, patch: Partial<{ title: string; extracted_text: string }>) {
+    setResumeVersionDrafts((previous) => ({
+      ...previous,
+      [version.id]: {
+        title: previous[version.id]?.title ?? version.title,
+        extracted_text: previous[version.id]?.extracted_text ?? version.extracted_text,
+        ...patch
+      }
+    }));
+  }
+
+  function getJobSpecificResumeVersions(jobId: string) {
+    return allResumeVersions
+      .filter((version) => version.job_id === jobId)
+      .sort((a, b) => b.version_no - a.version_no);
+  }
+
+  function getSelectedResumeVersion(jobId: string): ResumeVersion | undefined {
+    const selectedId = selectedResumeVersionByJobId[jobId];
+    return (
+      allResumeVersions.find((version) => version.id === selectedId) ??
+      getJobSpecificResumeVersions(jobId)[0] ??
+      defaultResumeVersion
+    );
+  }
+
+  function getEvaluationDelta(jobId: string) {
+    const history = evaluationHistoriesByJobId[jobId] ?? [];
+    if (history.length < 2) return null;
+    const [latest, previous] = history;
+    return {
+      latest,
+      previous,
+      scoreDelta: latest.final_score - previous.final_score
+    };
+  }
+
   async function startInterview(jobId: string) {
+    const selectedVersionId = getSelectedResumeVersion(jobId)?.id;
     setInterviewLoadingJobId(jobId);
     try {
       const response = await api.post<InterviewSession>("/interviews", {
         job_id: jobId,
+        resume_version_id: selectedVersionId,
         max_questions: 5
       });
       setActiveInterview(response.data);
@@ -1038,6 +1171,115 @@ export function App() {
     } finally {
       setAnswerSubmitting(false);
     }
+  }
+
+  function renderJobResumeVersionPanel(job: Job) {
+    const jobVersions = getJobSpecificResumeVersions(job.id);
+    const selectedVersion = getSelectedResumeVersion(job.id);
+    const versionOptions = [
+      ...(defaultResumeVersion ? [defaultResumeVersion] : []),
+      ...jobVersions
+    ].filter((version, index, versions) => versions.findIndex((item) => item.id === version.id) === index);
+    if (selectedVersion && !versionOptions.some((version) => version.id === selectedVersion.id)) {
+      versionOptions.unshift(selectedVersion);
+    }
+    const draft = selectedVersion
+      ? resumeVersionDrafts[selectedVersion.id] ?? {
+          title: selectedVersion.title,
+          extracted_text: selectedVersion.extracted_text
+        }
+      : null;
+    const canEdit = selectedVersion?.source_type === "job_copy";
+    const delta = getEvaluationDelta(job.id);
+
+    return (
+      <div className="resume-version-panel">
+        <div className="resume-version-header">
+          <div>
+            <Text strong>岗位专属简历版本</Text>
+            <Text type="secondary">
+              AI 只提供建议；这里的内容需要你手动编辑保存后再复评。
+            </Text>
+          </div>
+          {delta && (
+            <Tag color={delta.scoreDelta >= 0 ? "green" : "red"}>
+              较上次 {delta.scoreDelta >= 0 ? "+" : ""}
+              {delta.scoreDelta.toFixed(1)} 分
+            </Tag>
+          )}
+        </div>
+        <Space wrap className="resume-version-actions">
+          <Select
+            className="resume-version-select"
+            placeholder="选择用于复评的简历版本"
+            value={selectedVersion?.id}
+            options={versionOptions.map((version) => ({
+              value: version.id,
+              label: `${version.source_type === "job_copy" ? "专属" : "默认"} · ${version.title}`
+            }))}
+            onChange={(versionId) => {
+              const nextVersion = allResumeVersions.find((version) => version.id === versionId);
+              setSelectedResumeVersionByJobId((previous) => ({ ...previous, [job.id]: versionId }));
+              if (nextVersion) {
+                setResumeVersionDrafts((previous) => ({
+                  ...previous,
+                  [versionId]: {
+                    title: nextVersion.title,
+                    extracted_text: nextVersion.extracted_text
+                  }
+                }));
+              }
+            }}
+          />
+          <Button
+            loading={copyingResumeForJobId === job.id}
+            disabled={!defaultResumeVersion}
+            onClick={() => copyJobSpecificResumeVersion(job)}
+          >
+            复制岗位专属版本
+          </Button>
+          <Button
+            type="primary"
+            disabled={!selectedVersion}
+            loading={evaluatingJobId === job.id}
+            onClick={() => evaluateJob(job.id, selectedVersion?.id)}
+          >
+            用该版本复评
+          </Button>
+        </Space>
+        {selectedVersion && draft && (
+          <Space direction="vertical" size={8} className="resume-version-editor">
+            <Input
+              value={draft.title}
+              disabled={!canEdit}
+              onChange={(event) => updateResumeVersionDraft(selectedVersion, { title: event.target.value })}
+            />
+            <Input.TextArea
+              rows={6}
+              value={draft.extracted_text}
+              disabled={!canEdit}
+              onChange={(event) =>
+                updateResumeVersionDraft(selectedVersion, { extracted_text: event.target.value })
+              }
+            />
+            <Space wrap>
+              <Button
+                disabled={!canEdit}
+                loading={savingResumeVersionId === selectedVersion.id}
+                onClick={() => saveResumeVersion(selectedVersion)}
+              >
+                保存手动修改
+              </Button>
+              <Text type="secondary">
+                {canEdit
+                  ? `当前版本：${selectedVersion.title}`
+                  : "原始上传版本只读；请先复制岗位专属版本再编辑。"}
+              </Text>
+            </Space>
+          </Space>
+        )}
+      </div>
+    );
   }
 
   function renderJobList(jobList: Job[], emptyText: string, readonly = false) {
@@ -1492,6 +1734,7 @@ export function App() {
                         jobSearchForm.resetFields();
                         setCollectionSession(null);
                         setEvaluationsByJobId({});
+                        setEvaluationHistoriesByJobId({});
                         setMessage(null);
                       }}
                     >
@@ -1674,9 +1917,9 @@ export function App() {
                             key="evaluate"
                             type={evaluation ? "default" : "primary"}
                             loading={evaluatingJobId === item.id}
-                            onClick={() => evaluateJob(item.id)}
+                            onClick={() => evaluateJob(item.id, getSelectedResumeVersion(item.id)?.id)}
                           >
-                            {evaluation ? "重新 AI 测评" : "AI 测评"}
+                            {evaluation ? "用选中版本复评" : "AI 测评"}
                           </Button>,
                           <Button
                             key="interview"
@@ -1714,7 +1957,10 @@ export function App() {
                                 {item.salary ? ` / ${item.salary}` : ""}
                               </Text>
                               {item.tags && <Text type="secondary">标签：{item.tags}</Text>}
-                              {evaluation && <EvaluationSummary evaluation={evaluation} />}
+                              {renderJobResumeVersionPanel(item)}
+                              {evaluation && (
+                                <EvaluationSummary evaluation={evaluation} delta={getEvaluationDelta(item.id)} />
+                              )}
                             </Space>
                           }
                         />
@@ -2072,12 +2318,20 @@ function CardTitle({ icon, text }: { icon: React.ReactNode; text: string }) {
   );
 }
 
-function EvaluationSummary({ evaluation }: { evaluation: JobEvaluation }) {
+function EvaluationSummary({
+  evaluation,
+  delta
+}: {
+  evaluation: JobEvaluation;
+  delta?: { previous: JobEvaluation; scoreDelta: number } | null;
+}) {
   const dimensions = Object.entries(evaluation.dimensions);
   const requirements = evaluation.jd_requirements;
   const requiredSkills = requirements?.required_skills ?? [];
   const preferredSkills = requirements?.preferred_skills ?? [];
   const hasRequirements = requiredSkills.length > 0 || preferredSkills.length > 0;
+  const recommendationChanged =
+    Boolean(delta) && delta?.previous.recommendation !== evaluation.recommendation;
   return (
     <div className="evaluation-panel">
       <div className="evaluation-header">
@@ -2085,15 +2339,40 @@ function EvaluationSummary({ evaluation }: { evaluation: JobEvaluation }) {
           <Text strong>匹配度 {evaluation.final_score.toFixed(1)}/100</Text>
           <Text type="secondary"> · {evaluation.one_sentence_reason}</Text>
         </div>
-        <Tag color={evaluationTagColor(evaluation.final_score)}>{evaluation.recommendation}</Tag>
+        <Space wrap>
+          {delta && (
+            <Tag color={delta.scoreDelta >= 0 ? "green" : "red"}>
+              较上次 {delta.scoreDelta >= 0 ? "+" : ""}
+              {delta.scoreDelta.toFixed(1)} 分
+            </Tag>
+          )}
+          {recommendationChanged && delta && (
+            <Tag color="purple">
+              {delta.previous.recommendation} → {evaluation.recommendation}
+            </Tag>
+          )}
+          <Tag color={evaluationTagColor(evaluation.final_score)}>{evaluation.recommendation}</Tag>
+        </Space>
       </div>
       <Space wrap size={[6, 6]} className="evaluation-dimensions">
-        {dimensions.map(([key, dimension]) => (
-          <Tag key={key}>
-            {evaluationDimensionName(key)} {dimension.score.toFixed(0)}
-            {dimension.data_status === "insufficient_data" ? "（信息不足）" : ""}
-          </Tag>
-        ))}
+        {dimensions.map(([key, dimension]) => {
+          const previousDimension = delta?.previous.dimensions[key];
+          const dimensionDelta =
+            previousDimension !== undefined ? dimension.score - previousDimension.score : null;
+          return (
+            <Tag key={key}>
+              {evaluationDimensionName(key)} {dimension.score.toFixed(0)}
+              {dimensionDelta !== null && (
+                <>
+                  {" "}
+                  {dimensionDelta >= 0 ? "+" : ""}
+                  {dimensionDelta.toFixed(0)}
+                </>
+              )}
+              {dimension.data_status === "insufficient_data" ? "（信息不足）" : ""}
+            </Tag>
+          );
+        })}
       </Space>
       {hasRequirements && (
         <div className="evaluation-block">
@@ -2139,7 +2418,8 @@ function EvaluationSummary({ evaluation }: { evaluation: JobEvaluation }) {
         </div>
       )}
       <Text type="secondary">
-        框架 {evaluation.framework_version}，简历版本：{evaluation.resume_title ?? evaluation.resume_version_id}
+        框架 {evaluation.framework_version}，输出 {evaluation.output_schema_version}，简历版本：
+        {evaluation.resume_title ?? evaluation.resume_version_id}
       </Text>
     </div>
   );

@@ -24,6 +24,11 @@ class JobEvaluation(Base):
     )
     framework_version: Mapped[str] = mapped_column(String(30), nullable=False, default="v1")
     prompt_version: Mapped[str] = mapped_column(String(30), nullable=False, default="local-rule-v1")
+    output_schema_version: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="evaluation-json-v1",
+    )
     raw_weighted_score: Mapped[float] = mapped_column(Float, nullable=False)
     final_score: Mapped[float] = mapped_column(Float, nullable=False)
     recommendation: Mapped[str] = mapped_column(String(30), nullable=False)

@@ -5,14 +5,19 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.db.session import get_db
-from app.models import JobEvaluation, ResumeFile, ResumeVersion, User
-from app.schemas import ResumeFileResponse
+from app.models import Job, JobEvaluation, ResumeFile, ResumeVersion, User
+from app.schemas import (
+    CreateJobSpecificResumeVersionRequest,
+    ResumeFileResponse,
+    ResumeVersionResponse,
+    UpdateResumeVersionRequest,
+)
 from app.services.resume_parser import (
     SUPPORTED_RESUME_EXTENSIONS,
     compact_text,
@@ -60,6 +65,80 @@ def get_resume(
     if resume is None:
         raise HTTPException(status_code=404, detail="未找到该简历。")
     return resume
+
+
+@router.post(
+    "/versions/job-specific",
+    response_model=ResumeVersionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_job_specific_resume_version(
+    payload: CreateJobSpecificResumeVersionRequest,
+    current_user: CurrentUser,
+    db: DbSession,
+) -> ResumeVersion:
+    job = db.scalar(select(Job).where(Job.id == payload.job_id, Job.user_id == current_user.id))
+    if job is None:
+        raise HTTPException(status_code=404, detail="未找到该岗位。")
+    if not job.is_in_pool:
+        raise HTTPException(
+            status_code=422,
+            detail="请先确认投递并加入岗位池后再复制岗位专属简历。",
+        )
+
+    source_version = _get_owned_resume_version(
+        payload.source_resume_version_id,
+        current_user.id,
+        db,
+    )
+    next_version_no = _next_resume_version_no(source_version.resume_file_id, current_user.id, db)
+    default_title = f"{job.company} {job.title} 专属 v{next_version_no}"
+    version = ResumeVersion(
+        user_id=current_user.id,
+        resume_file_id=source_version.resume_file_id,
+        source_version_id=source_version.id,
+        job_id=job.id,
+        source_type="job_copy",
+        version_no=next_version_no,
+        title=(payload.title or default_title)[:120],
+        extracted_text=source_version.extracted_text,
+        structured_summary=source_version.structured_summary,
+    )
+    db.add(version)
+    db.commit()
+    db.refresh(version)
+    return version
+
+
+@router.patch("/versions/{version_id}", response_model=ResumeVersionResponse)
+def update_resume_version(
+    version_id: str,
+    payload: UpdateResumeVersionRequest,
+    current_user: CurrentUser,
+    db: DbSession,
+) -> ResumeVersion:
+    version = db.scalar(
+        select(ResumeVersion).where(
+            ResumeVersion.id == version_id,
+            ResumeVersion.user_id == current_user.id,
+        )
+    )
+    if version is None:
+        raise HTTPException(status_code=404, detail="未找到该简历版本。")
+    if version.source_type != "job_copy":
+        raise HTTPException(
+            status_code=422,
+            detail="只能编辑岗位专属简历版本，原始上传版本不会被覆盖。",
+        )
+
+    if payload.title is not None:
+        version.title = payload.title
+    version.extracted_text = compact_text(payload.extracted_text)
+    if not version.extracted_text:
+        raise HTTPException(status_code=422, detail="简历版本内容不能为空。")
+    db.commit()
+    db.refresh(version)
+    return version
 
 
 @router.post("/upload", response_model=ResumeFileResponse, status_code=status.HTTP_201_CREATED)
@@ -176,3 +255,44 @@ def delete_resume(
         replacement_default.is_default = True
     db.commit()
     storage_path.unlink(missing_ok=True)
+
+
+def _get_owned_resume_version(
+    resume_version_id: str | None,
+    user_id: str,
+    db: Session,
+) -> ResumeVersion:
+    if resume_version_id:
+        version = db.scalar(
+            select(ResumeVersion).where(
+                ResumeVersion.id == resume_version_id,
+                ResumeVersion.user_id == user_id,
+            )
+        )
+        if version is None:
+            raise HTTPException(status_code=404, detail="未找到该简历版本。")
+        return version
+
+    default_resume = db.scalar(
+        select(ResumeFile).where(ResumeFile.user_id == user_id, ResumeFile.is_default)
+    )
+    if default_resume is None:
+        raise HTTPException(status_code=422, detail="请先上传或设置默认简历。")
+    version = db.scalar(
+        select(ResumeVersion)
+        .where(ResumeVersion.user_id == user_id, ResumeVersion.resume_file_id == default_resume.id)
+        .order_by(ResumeVersion.version_no.desc(), ResumeVersion.created_at.desc())
+    )
+    if version is None:
+        raise HTTPException(status_code=422, detail="默认简历没有可用版本，请重新上传简历。")
+    return version
+
+
+def _next_resume_version_no(resume_file_id: str, user_id: str, db: Session) -> int:
+    max_version_no = db.scalar(
+        select(func.max(ResumeVersion.version_no)).where(
+            ResumeVersion.user_id == user_id,
+            ResumeVersion.resume_file_id == resume_file_id,
+        )
+    )
+    return (max_version_no or 0) + 1

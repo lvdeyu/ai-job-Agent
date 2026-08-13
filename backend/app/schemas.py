@@ -77,7 +77,13 @@ class ResumeVersionResponse(BaseModel):
     version_no: int
     title: str
     extracted_text: str
+    source_type: str = "uploaded"
+    source_version_id: str | None = None
+    job_id: str | None = None
+    job_title: str | None = None
+    company: str | None = None
     created_at: datetime
+    updated_at: datetime | None = None
 
 
 class ResumeFileResponse(BaseModel):
@@ -88,6 +94,17 @@ class ResumeFileResponse(BaseModel):
     is_default: bool
     created_at: datetime
     versions: list[ResumeVersionResponse]
+
+
+class CreateJobSpecificResumeVersionRequest(BaseModel):
+    job_id: str
+    source_resume_version_id: str | None = None
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+
+
+class UpdateResumeVersionRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    extracted_text: str = Field(min_length=1, max_length=50000)
 
 
 class CreateJobCollectionSessionRequest(BaseModel):
@@ -231,6 +248,7 @@ class JobEvaluationResponse(BaseModel):
     model_provider_id: str | None = None
     framework_version: str
     prompt_version: str
+    output_schema_version: str = "evaluation-json-v1"
     raw_weighted_score: float
     final_score: float
     recommendation: str
