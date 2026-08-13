@@ -5,13 +5,13 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import get_current_user
 from app.core.config import settings
 from app.db.session import get_db
-from app.models import ResumeFile, ResumeVersion, User
+from app.models import JobEvaluation, ResumeFile, ResumeVersion, User
 from app.schemas import ResumeFileResponse
 from app.services.resume_parser import (
     SUPPORTED_RESUME_EXTENSIONS,
@@ -138,3 +138,41 @@ def set_default_resume(
     resume.is_default = True
     db.commit()
     return get_resume(resume.id, current_user, db)
+
+
+@router.delete("/{resume_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_resume(
+    resume_id: str,
+    current_user: CurrentUser,
+    db: DbSession,
+) -> None:
+    resume = db.scalar(
+        select(ResumeFile).where(ResumeFile.id == resume_id, ResumeFile.user_id == current_user.id)
+    )
+    if resume is None:
+        raise HTTPException(status_code=404, detail="未找到该简历。")
+
+    replacement_default = None
+    if resume.is_default:
+        replacement_default = db.scalar(
+            select(ResumeFile)
+            .where(ResumeFile.user_id == current_user.id, ResumeFile.id != resume.id)
+            .order_by(ResumeFile.created_at.desc())
+        )
+
+    version_ids = db.scalars(
+        select(ResumeVersion.id).where(
+            ResumeVersion.user_id == current_user.id,
+            ResumeVersion.resume_file_id == resume.id,
+        )
+    ).all()
+    if version_ids:
+        db.execute(delete(JobEvaluation).where(JobEvaluation.resume_version_id.in_(version_ids)))
+        db.execute(delete(ResumeVersion).where(ResumeVersion.id.in_(version_ids)))
+
+    storage_path = Path(resume.storage_path)
+    db.delete(resume)
+    if replacement_default is not None:
+        replacement_default.is_default = True
+    db.commit()
+    storage_path.unlink(missing_ok=True)

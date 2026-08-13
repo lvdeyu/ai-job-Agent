@@ -4,12 +4,14 @@ import json
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models import (
+    InterviewSession,
+    InterviewTurn,
     Job,
     JobEvaluation,
     ModelProviderConfig,
@@ -18,7 +20,13 @@ from app.models import (
     User,
     UserProfile,
 )
-from app.schemas import CreateJobEvaluationRequest, JobEvaluationResponse, JobResponse
+from app.schemas import (
+    CreateJobEvaluationRequest,
+    DeleteJobPoolJobsRequest,
+    DeleteJobPoolJobsResponse,
+    JobEvaluationResponse,
+    JobResponse,
+)
 from app.services.job_evaluation import build_job_evaluation_report
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -30,12 +38,61 @@ CurrentUser = Annotated[User, Depends(get_current_user)]
 def list_jobs(
     current_user: CurrentUser,
     db: DbSession,
-) -> list[Job]:
-    return list(
-        db.scalars(
-            select(Job).where(Job.user_id == current_user.id).order_by(Job.created_at.desc())
-        ).all()
+) -> list[JobResponse]:
+    jobs = db.scalars(
+        select(Job).where(Job.user_id == current_user.id).order_by(Job.created_at.desc())
     )
+    return [_job_response(job, db) for job in jobs]
+
+
+@router.get("/pool", response_model=list[JobResponse])
+def list_job_pool(
+    current_user: CurrentUser,
+    db: DbSession,
+) -> list[JobResponse]:
+    jobs = db.scalars(
+        select(Job)
+        .where(Job.user_id == current_user.id, Job.is_in_pool)
+        .order_by(Job.updated_at.desc(), Job.created_at.desc())
+    )
+    return [_job_response(job, db) for job in jobs]
+
+
+@router.delete("/pool", response_model=DeleteJobPoolJobsResponse)
+def remove_jobs_from_pool(
+    payload: DeleteJobPoolJobsRequest,
+    current_user: CurrentUser,
+    db: DbSession,
+) -> DeleteJobPoolJobsResponse:
+    owned_job_ids = db.scalars(
+        select(Job.id).where(
+            Job.user_id == current_user.id,
+            Job.is_in_pool,
+            Job.id.in_(payload.job_ids),
+        )
+    ).all()
+    if owned_job_ids:
+        db.execute(
+            update(Job)
+            .where(Job.user_id == current_user.id, Job.id.in_(owned_job_ids))
+            .values(is_in_pool=False)
+        )
+        db.commit()
+    return DeleteJobPoolJobsResponse(removed_count=len(owned_job_ids))
+
+
+@router.post("/{job_id}/pool", response_model=JobResponse)
+def add_job_to_pool(
+    job_id: str,
+    current_user: CurrentUser,
+    db: DbSession,
+) -> JobResponse:
+    job = _get_owned_job(job_id, current_user.id, db)
+    if not job.is_in_pool:
+        job.is_in_pool = True
+        db.commit()
+        db.refresh(job)
+    return _job_response(job, db)
 
 
 @router.get("/{job_id}/evaluations", response_model=list[JobEvaluationResponse])
@@ -99,6 +156,37 @@ def _get_owned_job(job_id: str, user_id: str, db: Session) -> Job:
     if job is None:
         raise HTTPException(status_code=404, detail="未找到该岗位。")
     return job
+
+
+def _job_response(job: Job, db: Session) -> JobResponse:
+    has_interviewed = (
+        db.scalar(
+            select(InterviewTurn.id)
+            .join(InterviewSession, InterviewTurn.session_id == InterviewSession.id)
+            .where(
+                InterviewSession.user_id == job.user_id,
+                InterviewSession.job_id == job.id,
+                InterviewTurn.status == "answered",
+            )
+            .limit(1)
+        )
+        is not None
+    )
+    return JobResponse(
+        id=job.id,
+        title=job.title,
+        company=job.company,
+        location=job.location,
+        salary=job.salary,
+        experience=job.experience,
+        education=job.education,
+        tags=job.tags,
+        job_url=job.job_url,
+        description=job.description,
+        is_in_pool=job.is_in_pool,
+        has_interviewed=has_interviewed,
+        created_at=job.created_at,
+    )
 
 
 def _get_resume_version(

@@ -109,6 +109,7 @@ class JobResponse(BaseModel):
     job_url: str | None
     description: str | None
     is_in_pool: bool
+    has_interviewed: bool = False
     created_at: datetime
 
 
@@ -155,6 +156,22 @@ class JobCollectionSessionListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class DeleteJobCollectionSessionsRequest(BaseModel):
+    session_ids: list[str] = Field(min_length=1, max_length=100)
+
+
+class DeleteJobCollectionSessionsResponse(BaseModel):
+    deleted_count: int
+
+
+class DeleteJobPoolJobsRequest(BaseModel):
+    job_ids: list[str] = Field(min_length=1, max_length=100)
+
+
+class DeleteJobPoolJobsResponse(BaseModel):
+    removed_count: int
 
 
 class CollectedJobItem(BaseModel):
@@ -221,3 +238,75 @@ class JobEvaluationResponse(BaseModel):
     resume_focus_suggestions: list[str]
     honest_gap_statements: list[str]
     created_at: datetime
+
+
+class CreateInterviewSessionRequest(BaseModel):
+    job_id: str
+    resume_version_id: str | None = None
+    max_questions: int = Field(default=5, ge=1, le=8)
+
+
+class SubmitInterviewAnswerRequest(BaseModel):
+    answer_text: str = Field(min_length=1, max_length=8000)
+
+
+class InterviewTurnResponse(BaseModel):
+    id: str
+    turn_index: int
+    question_text: str
+    question_type: str
+    skill_tags: list[str]
+    is_followup: bool
+    followup_depth: int
+    answer_text: str | None
+    score: float | None
+    feedback: str | None
+    evidence: list[str]
+    status: str
+    question_bank_item_external_id: str | None = None
+    created_at: datetime
+    answered_at: datetime | None = None
+
+
+class InterviewSessionResponse(BaseModel):
+    id: str
+    job_id: str
+    job_title: str
+    company: str
+    resume_version_id: str
+    resume_title: str | None = None
+    job_evaluation_id: str | None = None
+    status: str
+    retrieval_mode: str
+    scoring_mode: str
+    max_questions: int
+    main_questions_answered: int
+    current_turn: InterviewTurnResponse | None = None
+    turns: list[InterviewTurnResponse]
+    report: dict[str, Any] | None = None
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None = None
+
+
+class InterviewHistoryItemResponse(BaseModel):
+    id: str
+    job_id: str
+    job_title: str
+    company: str
+    location: str | None = None
+    salary: str | None = None
+    status: str
+    total_score: float | None = None
+    question_count: int = 0
+    main_questions_answered: int
+    created_at: datetime
+    completed_at: datetime | None = None
+
+
+class DeleteInterviewSessionsRequest(BaseModel):
+    session_ids: list[str] = Field(min_length=1, max_length=100)
+
+
+class DeleteInterviewSessionsResponse(BaseModel):
+    deleted_count: int

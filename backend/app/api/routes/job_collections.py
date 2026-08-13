@@ -16,6 +16,8 @@ from app.db.session import get_db
 from app.models import Job, JobCollectionSession, JobCollectionSessionJob, User
 from app.schemas import (
     CreateJobCollectionSessionRequest,
+    DeleteJobCollectionSessionsRequest,
+    DeleteJobCollectionSessionsResponse,
     JobCollectionSessionListResponse,
     JobCollectionSessionResponse,
     JobCollectionSessionSummaryResponse,
@@ -50,6 +52,7 @@ def _job_response(job: Job) -> JobResponse:
         job_url=job.job_url,
         description=job.description,
         is_in_pool=job.is_in_pool,
+        has_interviewed=False,
         created_at=job.created_at,
     )
 
@@ -155,6 +158,22 @@ def list_collection_sessions(
     )
 
 
+@router.delete("/sessions", response_model=DeleteJobCollectionSessionsResponse)
+def delete_collection_sessions(
+    payload: DeleteJobCollectionSessionsRequest,
+    current_user: CurrentUser,
+    db: DbSession,
+) -> DeleteJobCollectionSessionsResponse:
+    sessions = db.scalars(
+        select(JobCollectionSession).where(
+            JobCollectionSession.id.in_(payload.session_ids),
+            JobCollectionSession.user_id == current_user.id,
+        )
+    ).all()
+    deleted_count = _delete_collection_sessions(sessions, db)
+    return DeleteJobCollectionSessionsResponse(deleted_count=deleted_count)
+
+
 @router.get("/sessions/{session_id}", response_model=JobCollectionSessionResponse)
 def get_collection_session(
     session_id: str,
@@ -193,13 +212,23 @@ def delete_collection_session(
     if session is None:
         raise HTTPException(status_code=404, detail="未找到该搜索历史。")
 
+    _delete_collection_sessions([session], db)
+
+
+def _delete_collection_sessions(sessions: list[JobCollectionSession], db: Session) -> int:
+    if not sessions:
+        return 0
+
+    session_ids = [session.id for session in sessions]
     db.execute(
         update(Job)
-        .where(Job.collection_session_id == session.id)
+        .where(Job.collection_session_id.in_(session_ids))
         .values(collection_session_id=None)
     )
-    db.delete(session)
+    for session in sessions:
+        db.delete(session)
     db.commit()
+    return len(sessions)
 
 
 @router.post("/sessions/{session_id}/jobs", response_model=SubmitCollectedJobsResponse)

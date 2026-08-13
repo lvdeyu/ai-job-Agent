@@ -4,6 +4,7 @@ import {
   Alert,
   Button,
   Card,
+  Checkbox,
   ConfigProvider,
   Divider,
   Form,
@@ -18,13 +19,13 @@ import {
   Typography,
   Upload
 } from "antd";
-import { Bot, BriefcaseBusiness, FileText, History, LogOut, Search, Settings, ShieldCheck, UserRound } from "lucide-react";
+import { Bot, BriefcaseBusiness, FileText, History, LogOut, MessageSquareText, Search, Settings, ShieldCheck, Trash2, UserRound } from "lucide-react";
 
 const { Header, Content } = Layout;
 const { Title, Paragraph, Text } = Typography;
 
 const API_BASE = "http://127.0.0.1:18000/api/v1";
-type SectionKey = "config" | "job_search" | "history";
+type SectionKey = "config" | "job_search" | "history" | "job_pool" | "interview" | "interview_history";
 const DEFAULT_PROVIDER_BASE_URLS: Record<string, string> = {
   openai: "https://api.openai.com/v1",
   tongyi: "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -86,6 +87,7 @@ interface Job {
   job_url?: string;
   description?: string;
   is_in_pool: boolean;
+  has_interviewed: boolean;
   created_at: string;
 }
 
@@ -174,6 +176,63 @@ interface JobCollectionHistoryPage {
   page_size: number;
 }
 
+interface InterviewTurn {
+  id: string;
+  turn_index: number;
+  question_text: string;
+  question_type: string;
+  skill_tags: string[];
+  is_followup: boolean;
+  followup_depth: number;
+  answer_text?: string;
+  score?: number;
+  feedback?: string;
+  evidence: string[];
+  status: string;
+  question_bank_item_external_id?: string;
+}
+
+interface InterviewSession {
+  id: string;
+  job_id: string;
+  job_title: string;
+  company: string;
+  resume_version_id: string;
+  resume_title?: string;
+  job_evaluation_id?: string;
+  status: "running" | "completed";
+  retrieval_mode: string;
+  scoring_mode: string;
+  max_questions: number;
+  main_questions_answered: number;
+  current_turn?: InterviewTurn;
+  turns: InterviewTurn[];
+  report?: {
+    total_score?: number;
+    question_count?: number;
+    summary?: string;
+    strengths?: string[];
+    gaps?: string[];
+    review_suggestions?: string[];
+    covered_skills?: string[];
+  };
+}
+
+interface InterviewHistoryItem {
+  id: string;
+  job_id: string;
+  job_title: string;
+  company: string;
+  location?: string;
+  salary?: string;
+  status: "running" | "completed";
+  total_score?: number;
+  question_count: number;
+  main_questions_answered: number;
+  created_at: string;
+  completed_at?: string;
+}
+
 interface ExtensionResponse {
   ok: boolean;
   created?: number;
@@ -196,6 +255,7 @@ export function App() {
   const [providers, setProviders] = useState<ModelProvider[]>([]);
   const [resumes, setResumes] = useState<ResumeFile[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [jobPool, setJobPool] = useState<Job[]>([]);
   const [resumeFile, setResumeFile] = useState<File | null>(null);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
@@ -212,9 +272,31 @@ export function App() {
   const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(null);
   const [historyDetails, setHistoryDetails] = useState<Record<string, JobCollectionSession>>({});
   const [deletingHistoryId, setDeletingHistoryId] = useState<string | null>(null);
+  const [selectedHistoryIds, setSelectedHistoryIds] = useState<string[]>([]);
+  const [deletingHistoryBatch, setDeletingHistoryBatch] = useState(false);
+  const [jobPoolLoading, setJobPoolLoading] = useState(false);
+  const [addingToPoolJobId, setAddingToPoolJobId] = useState<string | null>(null);
+  const [jobPoolFilter, setJobPoolFilter] = useState("");
+  const [selectedJobPoolIds, setSelectedJobPoolIds] = useState<string[]>([]);
+  const [removingJobPoolBatch, setRemovingJobPoolBatch] = useState(false);
+  const [profileDirty, setProfileDirty] = useState(false);
+  const [providerDirty, setProviderDirty] = useState(false);
+  const [deletingProviderId, setDeletingProviderId] = useState<string | null>(null);
+  const [deletingResumeId, setDeletingResumeId] = useState<string | null>(null);
+  const [settingDefaultResumeId, setSettingDefaultResumeId] = useState<string | null>(null);
+  const [activeInterview, setActiveInterview] = useState<InterviewSession | null>(null);
+  const [interviewHistory, setInterviewHistory] = useState<InterviewHistoryItem[]>([]);
+  const [interviewHistoryLoading, setInterviewHistoryLoading] = useState(false);
+  const [interviewLoadingJobId, setInterviewLoadingJobId] = useState<string | null>(null);
+  const [loadingInterviewDetailId, setLoadingInterviewDetailId] = useState<string | null>(null);
+  const [selectedInterviewHistoryIds, setSelectedInterviewHistoryIds] = useState<string[]>([]);
+  const [deletingInterviewHistoryId, setDeletingInterviewHistoryId] = useState<string | null>(null);
+  const [deletingInterviewHistoryBatch, setDeletingInterviewHistoryBatch] = useState(false);
+  const [answerSubmitting, setAnswerSubmitting] = useState(false);
   const [profileForm] = Form.useForm<Profile>();
   const [providerForm] = Form.useForm();
   const [jobSearchForm] = Form.useForm();
+  const [interviewAnswerForm] = Form.useForm<{ answer_text: string }>();
 
   const api = useMemo(
     () =>
@@ -226,6 +308,38 @@ export function App() {
   );
   const displayedJobs = collectionSession?.jobs ?? [];
   const displayedJobIds = displayedJobs.map((job) => job.id).join("|");
+  const historyPageIds = historyData?.items.map((item) => item.id) ?? [];
+  const selectedHistoryIdsOnPage = historyPageIds.filter((id) => selectedHistoryIds.includes(id));
+  const isHistoryPageFullySelected =
+    historyPageIds.length > 0 && selectedHistoryIdsOnPage.length === historyPageIds.length;
+  const isHistoryPagePartiallySelected =
+    selectedHistoryIdsOnPage.length > 0 && selectedHistoryIdsOnPage.length < historyPageIds.length;
+  const filteredJobPool = useMemo(() => {
+    const keyword = jobPoolFilter.trim().toLowerCase();
+    if (!keyword) return jobPool;
+    return jobPool.filter((job) =>
+      [job.title, job.company, job.location, job.salary, job.tags, job.description]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase()
+        .includes(keyword)
+    );
+  }, [jobPool, jobPoolFilter]);
+  const filteredJobPoolIds = filteredJobPool.map((job) => job.id);
+  const selectedJobPoolIdsOnPage = filteredJobPoolIds.filter((id) => selectedJobPoolIds.includes(id));
+  const isJobPoolFullySelected =
+    filteredJobPoolIds.length > 0 && selectedJobPoolIdsOnPage.length === filteredJobPoolIds.length;
+  const isJobPoolPartiallySelected =
+    selectedJobPoolIdsOnPage.length > 0 && selectedJobPoolIdsOnPage.length < filteredJobPoolIds.length;
+  const interviewHistoryIds = interviewHistory.map((item) => item.id);
+  const selectedInterviewHistoryIdsOnPage = interviewHistoryIds.filter((id) =>
+    selectedInterviewHistoryIds.includes(id)
+  );
+  const isInterviewHistoryFullySelected =
+    interviewHistoryIds.length > 0 && selectedInterviewHistoryIdsOnPage.length === interviewHistoryIds.length;
+  const isInterviewHistoryPartiallySelected =
+    selectedInterviewHistoryIdsOnPage.length > 0 &&
+    selectedInterviewHistoryIdsOnPage.length < interviewHistoryIds.length;
 
   async function refreshWorkspace() {
     if (!token) return;
@@ -241,6 +355,7 @@ export function App() {
     setProviders(modelProviders.data);
     setResumes(resumeList.data);
     setJobs(jobList.data);
+    setJobPool(jobList.data.filter((job) => job.is_in_pool));
   }
 
   useEffect(() => {
@@ -263,6 +378,20 @@ export function App() {
       setMessage({ type: "error", text: errorMessage(error) });
     });
   }, [token, activeSection, historyPage]);
+
+  useEffect(() => {
+    if (!token || activeSection !== "job_pool") return;
+    loadJobPool().catch((error) => {
+      setMessage({ type: "error", text: errorMessage(error) });
+    });
+  }, [token, activeSection]);
+
+  useEffect(() => {
+    if (!token || activeSection !== "interview_history") return;
+    loadInterviewHistory().catch((error) => {
+      setMessage({ type: "error", text: errorMessage(error) });
+    });
+  }, [token, activeSection]);
 
   useEffect(() => {
     function handleExtensionReady(event: MessageEvent) {
@@ -293,6 +422,7 @@ export function App() {
   async function saveProfile(values: Profile) {
     try {
       await api.put("/profile", values);
+      setProfileDirty(false);
       setMessage({ type: "success", text: "个人求职配置已保存" });
     } catch (error) {
       setMessage({ type: "error", text: errorMessage(error) });
@@ -308,14 +438,8 @@ export function App() {
         proxy_url: values.network_mode === "manual_proxy" ? values.proxy_url : undefined
       };
       await api.post("/model-providers", payload);
-      providerForm.resetFields();
-      providerForm.setFieldsValue({
-        provider: "openai",
-        base_url: DEFAULT_PROVIDER_BASE_URLS.openai,
-        timeout_seconds: 30,
-        network_mode: "auto"
-      });
-      setNetworkMode("auto");
+      setProviderDirty(false);
+      setNetworkMode(values.network_mode as ModelProvider["network_mode"]);
       await refreshWorkspace();
       setMessage({ type: "success", text: "AI 模型配置已保存" });
     } catch (error) {
@@ -335,6 +459,22 @@ export function App() {
     }
   }
 
+  async function deleteProvider(providerId: string) {
+    const confirmed = window.confirm("确定删除这个 AI 模型配置吗？删除后不会影响已经生成的历史评测。");
+    if (!confirmed) return;
+
+    setDeletingProviderId(providerId);
+    try {
+      await api.delete(`/model-providers/${providerId}`);
+      await refreshWorkspace();
+      setMessage({ type: "success", text: "AI 模型配置已删除。" });
+    } catch (error) {
+      setMessage({ type: "error", text: errorMessage(error) });
+    } finally {
+      setDeletingProviderId(null);
+    }
+  }
+
   async function uploadResume() {
     if (!resumeFile) {
       setMessage({ type: "error", text: "请先选择 .docx、.md 或 .pdf 简历文件" });
@@ -351,6 +491,37 @@ export function App() {
       setMessage({ type: "success", text: "简历上传并解析成功" });
     } catch (error) {
       setMessage({ type: "error", text: errorMessage(error) });
+    }
+  }
+
+  async function setDefaultResume(resumeId: string) {
+    setSettingDefaultResumeId(resumeId);
+    try {
+      await api.post(`/resumes/${resumeId}/set-default`);
+      await refreshWorkspace();
+      setMessage({ type: "success", text: "默认简历已更新。" });
+    } catch (error) {
+      setMessage({ type: "error", text: errorMessage(error) });
+    } finally {
+      setSettingDefaultResumeId(null);
+    }
+  }
+
+  async function deleteResume(resumeId: string) {
+    const confirmed = window.confirm(
+      "确定删除这份简历吗？该简历版本关联的历史 AI 测评也会一并删除；上传新简历后可以重新测评。"
+    );
+    if (!confirmed) return;
+
+    setDeletingResumeId(resumeId);
+    try {
+      await api.delete(`/resumes/${resumeId}`);
+      await refreshWorkspace();
+      setMessage({ type: "success", text: "简历已删除。" });
+    } catch (error) {
+      setMessage({ type: "error", text: errorMessage(error) });
+    } finally {
+      setDeletingResumeId(null);
     }
   }
 
@@ -444,6 +615,135 @@ export function App() {
     }
   }
 
+  async function loadJobPool() {
+    if (!token) return;
+    setJobPoolLoading(true);
+    try {
+      const response = await api.get<Job[]>("/jobs/pool");
+      setJobPool(response.data);
+      setSelectedJobPoolIds((previous) =>
+        previous.filter((id) => response.data.some((job) => job.id === id))
+      );
+      await loadLatestEvaluations(response.data);
+    } finally {
+      setJobPoolLoading(false);
+    }
+  }
+
+  async function removeSelectedJobsFromPool() {
+    if (selectedJobPoolIds.length === 0) {
+      setMessage({ type: "error", text: "请先选择要移出岗位池的岗位。" });
+      return;
+    }
+    const confirmed = window.confirm(
+      `确定将选中的 ${selectedJobPoolIds.length} 个岗位移出岗位池吗？岗位数据、AI 测评和面试历史都会保留。`
+    );
+    if (!confirmed) return;
+    setRemovingJobPoolBatch(true);
+    try {
+      const response = await api.delete<{ removed_count: number }>("/jobs/pool", {
+        data: { job_ids: selectedJobPoolIds }
+      });
+      setSelectedJobPoolIds([]);
+      await refreshWorkspace();
+      await loadJobPool();
+      setMessage({
+        type: "success",
+        text: `已移出 ${response.data.removed_count} 个岗位，岗位数据、AI 测评和面试历史已保留。`
+      });
+    } catch (error) {
+      setMessage({ type: "error", text: errorMessage(error) });
+    } finally {
+      setRemovingJobPoolBatch(false);
+    }
+  }
+
+  async function loadInterviewHistory() {
+    if (!token) return;
+    setInterviewHistoryLoading(true);
+    try {
+      const response = await api.get<InterviewHistoryItem[]>("/interviews/history");
+      setInterviewHistory(response.data);
+    } finally {
+      setInterviewHistoryLoading(false);
+    }
+  }
+
+  async function openInterviewDetail(sessionId: string) {
+    setLoadingInterviewDetailId(sessionId);
+    try {
+      const response = await api.get<InterviewSession>(`/interviews/${sessionId}`);
+      setActiveInterview(response.data);
+    } catch (error) {
+      setMessage({ type: "error", text: errorMessage(error) });
+    } finally {
+      setLoadingInterviewDetailId(null);
+    }
+  }
+
+  async function deleteInterviewHistory(sessionId: string) {
+    const confirmed = window.confirm("确定删除这条面试历史吗？不会删除岗位、岗位池或 AI 测评。");
+    if (!confirmed) return;
+    setDeletingInterviewHistoryId(sessionId);
+    try {
+      await api.delete(`/interviews/history/${sessionId}`);
+      setSelectedInterviewHistoryIds((previous) => previous.filter((id) => id !== sessionId));
+      if (activeInterview?.id === sessionId) {
+        setActiveInterview(null);
+      }
+      await loadInterviewHistory();
+      await loadJobPool();
+      setMessage({ type: "success", text: "面试历史已删除。" });
+    } catch (error) {
+      setMessage({ type: "error", text: errorMessage(error) });
+    } finally {
+      setDeletingInterviewHistoryId(null);
+    }
+  }
+
+  async function deleteSelectedInterviewHistory() {
+    if (selectedInterviewHistoryIds.length === 0) {
+      setMessage({ type: "error", text: "请先选择要删除的面试历史。" });
+      return;
+    }
+    const confirmed = window.confirm(
+      `确定删除选中的 ${selectedInterviewHistoryIds.length} 条面试历史吗？不会删除岗位、岗位池或 AI 测评。`
+    );
+    if (!confirmed) return;
+    const idsToDelete = [...selectedInterviewHistoryIds];
+    setDeletingInterviewHistoryBatch(true);
+    try {
+      const response = await api.delete<{ deleted_count: number }>("/interviews/history", {
+        data: { session_ids: idsToDelete }
+      });
+      setSelectedInterviewHistoryIds([]);
+      if (activeInterview && idsToDelete.includes(activeInterview.id)) {
+        setActiveInterview(null);
+      }
+      await loadInterviewHistory();
+      await loadJobPool();
+      setMessage({ type: "success", text: `已删除 ${response.data.deleted_count} 条面试历史。` });
+    } catch (error) {
+      setMessage({ type: "error", text: errorMessage(error) });
+    } finally {
+      setDeletingInterviewHistoryBatch(false);
+    }
+  }
+
+  function toggleInterviewHistorySelection(sessionId: string, checked: boolean) {
+    setSelectedInterviewHistoryIds((previous) => {
+      if (checked) return previous.includes(sessionId) ? previous : [...previous, sessionId];
+      return previous.filter((id) => id !== sessionId);
+    });
+  }
+
+  function toggleInterviewHistoryPageSelection(checked: boolean) {
+    setSelectedInterviewHistoryIds((previous) => {
+      if (checked) return Array.from(new Set([...previous, ...interviewHistoryIds]));
+      return previous.filter((id) => !interviewHistoryIds.includes(id));
+    });
+  }
+
   async function openHistorySession(sessionId: string) {
     if (expandedHistoryId === sessionId) {
       setExpandedHistoryId(null);
@@ -471,6 +771,7 @@ export function App() {
         delete next[sessionId];
         return next;
       });
+      setSelectedHistoryIds((previous) => previous.filter((id) => id !== sessionId));
       if (expandedHistoryId === sessionId) {
         setExpandedHistoryId(null);
       }
@@ -484,6 +785,116 @@ export function App() {
       setMessage({ type: "error", text: errorMessage(error) });
     } finally {
       setDeletingHistoryId(null);
+    }
+  }
+
+  async function deleteSelectedHistorySessions() {
+    if (selectedHistoryIds.length === 0) {
+      setMessage({ type: "error", text: "请先选择要删除的搜索历史。" });
+      return;
+    }
+    const confirmed = window.confirm(
+      `确定删除选中的 ${selectedHistoryIds.length} 条搜索历史吗？岗位数据和已有 AI 测评不会被删除。`
+    );
+    if (!confirmed) return;
+
+    const idsToDelete = [...selectedHistoryIds];
+    setDeletingHistoryBatch(true);
+    try {
+      const response = await api.delete<{ deleted_count: number }>("/job-collections/sessions", {
+        data: { session_ids: idsToDelete }
+      });
+      setHistoryDetails((previous) => {
+        const next = { ...previous };
+        idsToDelete.forEach((id) => {
+          delete next[id];
+        });
+        return next;
+      });
+      setSelectedHistoryIds((previous) => previous.filter((id) => !idsToDelete.includes(id)));
+      if (expandedHistoryId && idsToDelete.includes(expandedHistoryId)) {
+        setExpandedHistoryId(null);
+      }
+
+      const nextTotal = Math.max((historyData?.total ?? idsToDelete.length) - response.data.deleted_count, 0);
+      const nextPage = Math.min(historyPage, Math.max(Math.ceil(nextTotal / 10), 1));
+      setHistoryPage(nextPage);
+      await loadCollectionHistory(nextPage);
+      setMessage({
+        type: "success",
+        text: `已删除 ${response.data.deleted_count} 条搜索历史，岗位数据和 AI 测评已保留。`
+      });
+    } catch (error) {
+      setMessage({ type: "error", text: errorMessage(error) });
+    } finally {
+      setDeletingHistoryBatch(false);
+    }
+  }
+
+  function toggleHistorySelection(sessionId: string, checked: boolean) {
+    setSelectedHistoryIds((previous) => {
+      if (checked) return previous.includes(sessionId) ? previous : [...previous, sessionId];
+      return previous.filter((id) => id !== sessionId);
+    });
+  }
+
+  function toggleHistoryPageSelection(checked: boolean) {
+    setSelectedHistoryIds((previous) => {
+      if (checked) return Array.from(new Set([...previous, ...historyPageIds]));
+      return previous.filter((id) => !historyPageIds.includes(id));
+    });
+  }
+
+  function toggleJobPoolSelection(jobId: string, checked: boolean) {
+    setSelectedJobPoolIds((previous) => {
+      if (checked) return previous.includes(jobId) ? previous : [...previous, jobId];
+      return previous.filter((id) => id !== jobId);
+    });
+  }
+
+  function toggleJobPoolPageSelection(checked: boolean) {
+    setSelectedJobPoolIds((previous) => {
+      if (checked) return Array.from(new Set([...previous, ...filteredJobPoolIds]));
+      return previous.filter((id) => !filteredJobPoolIds.includes(id));
+    });
+  }
+
+  function syncJob(updatedJob: Job) {
+    setJobs((previous) => previous.map((job) => (job.id === updatedJob.id ? updatedJob : job)));
+    setJobPool((previous) => {
+      const withoutUpdated = previous.filter((job) => job.id !== updatedJob.id);
+      return updatedJob.is_in_pool ? [updatedJob, ...withoutUpdated] : withoutUpdated;
+    });
+    setCollectionSession((previous) =>
+      previous
+        ? {
+            ...previous,
+            jobs: previous.jobs.map((job) => (job.id === updatedJob.id ? updatedJob : job))
+          }
+        : previous
+    );
+    setHistoryDetails((previous) => {
+      const next: Record<string, JobCollectionSession> = {};
+      for (const [sessionId, session] of Object.entries(previous)) {
+        next[sessionId] = {
+          ...session,
+          jobs: session.jobs.map((job) => (job.id === updatedJob.id ? updatedJob : job))
+        };
+      }
+      return next;
+    });
+  }
+
+  async function addJobToPool(jobId: string) {
+    setAddingToPoolJobId(jobId);
+    try {
+      const response = await api.post<Job>(`/jobs/${jobId}/pool`);
+      syncJob(response.data);
+      setMessage({ type: "success", text: "已确认投递，岗位已加入岗位池。" });
+    } catch (error) {
+      setMessage({ type: "error", text: errorMessage(error) });
+    } finally {
+      setAddingToPoolJobId(null);
     }
   }
 
@@ -523,7 +934,64 @@ export function App() {
     }
   }
 
-  function renderJobList(jobList: Job[], emptyText: string) {
+  async function startInterview(jobId: string) {
+    setInterviewLoadingJobId(jobId);
+    try {
+      const response = await api.post<InterviewSession>("/interviews", {
+        job_id: jobId,
+        max_questions: 5
+      });
+      setActiveInterview(response.data);
+      interviewAnswerForm.resetFields();
+      setActiveSection("interview");
+      setMessage({ type: "success", text: "模拟面试已开始，请回答当前问题。" });
+    } catch (error) {
+      setMessage({ type: "error", text: errorMessage(error) });
+    } finally {
+      setInterviewLoadingJobId(null);
+    }
+  }
+
+  async function submitInterviewAnswer(values: { answer_text: string }) {
+    if (!activeInterview) return;
+    setAnswerSubmitting(true);
+    try {
+      const response = await api.post<InterviewSession>(
+        `/interviews/${activeInterview.id}/answers`,
+        values
+      );
+      setActiveInterview(response.data);
+      interviewAnswerForm.resetFields();
+      await loadInterviewHistory();
+      await loadJobPool();
+      setMessage({
+        type: "success",
+        text: response.data.status === "completed" ? "模拟面试已完成，报告已生成。" : "回答已提交，进入下一步。"
+      });
+    } catch (error) {
+      setMessage({ type: "error", text: errorMessage(error) });
+    } finally {
+      setAnswerSubmitting(false);
+    }
+  }
+
+  async function finishInterview() {
+    if (!activeInterview) return;
+    setAnswerSubmitting(true);
+    try {
+      const response = await api.post<InterviewSession>(`/interviews/${activeInterview.id}/finish`);
+      setActiveInterview(response.data);
+      await loadInterviewHistory();
+      await loadJobPool();
+      setMessage({ type: "success", text: "已结束模拟面试并生成报告。" });
+    } catch (error) {
+      setMessage({ type: "error", text: errorMessage(error) });
+    } finally {
+      setAnswerSubmitting(false);
+    }
+  }
+
+  function renderJobList(jobList: Job[], emptyText: string, readonly = false) {
     return (
       <List
         dataSource={jobList}
@@ -532,19 +1000,28 @@ export function App() {
           const evaluation = evaluationsByJobId[item.id];
           return (
             <List.Item
-              actions={[
-                <Button
-                  key="evaluate"
-                  type={evaluation ? "default" : "primary"}
-                  loading={evaluatingJobId === item.id}
-                  onClick={() => evaluateJob(item.id)}
-                >
-                  {evaluation ? "重新 AI 测评" : "AI 测评"}
-                </Button>,
-                <Button key="pool" disabled>
-                  确认投递（V0.1-4）
-                </Button>
-              ]}
+              actions={
+                readonly
+                  ? []
+                  : [
+                      <Button
+                        key="evaluate"
+                        type={evaluation ? "default" : "primary"}
+                        loading={evaluatingJobId === item.id}
+                        onClick={() => evaluateJob(item.id)}
+                      >
+                        {evaluation ? "重新 AI 测评" : "AI 测评"}
+                      </Button>,
+                      <Button
+                        key="pool"
+                        disabled={item.is_in_pool}
+                        loading={addingToPoolJobId === item.id}
+                        onClick={() => addJobToPool(item.id)}
+                      >
+                        {item.is_in_pool ? "已确认投递" : "确认投递"}
+                      </Button>
+                    ]
+              }
             >
               <List.Item.Meta
                 title={
@@ -553,6 +1030,7 @@ export function App() {
                       {item.title}
                     </a>
                     {item.is_in_pool && <Tag color="green">已入岗位池</Tag>}
+                    {item.has_interviewed && <Tag color="purple">已模拟面试</Tag>}
                     {evaluation && <Tag color={evaluationTagColor(evaluation.final_score)}>{evaluation.recommendation}</Tag>}
                   </Space>
                 }
@@ -582,6 +1060,17 @@ export function App() {
     setProviders([]);
     setResumes([]);
     setJobs([]);
+    setJobPool([]);
+    setJobPoolFilter("");
+    setSelectedJobPoolIds([]);
+    setActiveInterview(null);
+    setInterviewHistory([]);
+    setSelectedInterviewHistoryIds([]);
+    setProfileDirty(false);
+    setProviderDirty(false);
+    setSelectedHistoryIds([]);
+    setHistoryDetails({});
+    setHistoryData(null);
   }
 
   return (
@@ -591,7 +1080,7 @@ export function App() {
           <Space>
             <Bot size={22} />
             <Text className="brand">ai-job-AGENT</Text>
-            <Tag color="blue">V0.1-2 Boss 采集</Tag>
+            <Tag color="blue">V0.1-4 岗位池</Tag>
           </Space>
           {user && (
             <Space>
@@ -653,7 +1142,27 @@ export function App() {
                   <History size={18} />
                   <span>搜索历史</span>
                 </button>
-                <div className="sidebar-next">岗位池将在 V0.1-4 加入</div>
+                <button
+                  className={`sidebar-item ${activeSection === "job_pool" ? "active" : ""}`}
+                  onClick={() => setActiveSection("job_pool")}
+                >
+                  <BriefcaseBusiness size={18} />
+                  <span>岗位池</span>
+                </button>
+                <button
+                  className={`sidebar-item ${activeSection === "interview" ? "active" : ""}`}
+                  onClick={() => setActiveSection("interview")}
+                >
+                  <MessageSquareText size={18} />
+                  <span>模拟面试</span>
+                </button>
+                <button
+                  className={`sidebar-item ${activeSection === "interview_history" ? "active" : ""}`}
+                  onClick={() => setActiveSection("interview_history")}
+                >
+                  <History size={18} />
+                  <span>面试历史</span>
+                </button>
               </aside>
               <main className={`workspace-panel show-${activeSection}`}>
                 <div className="section-hero">
@@ -667,7 +1176,12 @@ export function App() {
                 </div>
                 <div className="workspace-grid">
               <Card className="config-section" title={<CardTitle icon={<Settings size={18} />} text="个人求职配置" />}>
-                <Form form={profileForm} layout="vertical" onFinish={saveProfile}>
+                <Form
+                  form={profileForm}
+                  layout="vertical"
+                  onFinish={saveProfile}
+                  onValuesChange={() => setProfileDirty(true)}
+                >
                   <Form.Item name="target_role" label="意愿岗位">
                     <Input placeholder="Agent 开发实习生 / Java 后端实习生" />
                   </Form.Item>
@@ -694,8 +1208,8 @@ export function App() {
                   <Form.Item name="deal_breakers" label="不能接受的条件">
                     <Input.TextArea rows={3} placeholder="例如：不接受无薪实习、不接受长期出差" />
                   </Form.Item>
-                  <Button type="primary" htmlType="submit">
-                    保存个人配置
+                  <Button type={profileDirty ? "primary" : "default"} htmlType="submit" disabled={!profileDirty}>
+                    {profileDirty ? "保存个人配置" : "个人配置已保存，修改后可再次保存"}
                   </Button>
                 </Form>
               </Card>
@@ -705,6 +1219,7 @@ export function App() {
                   form={providerForm}
                   layout="vertical"
                   onFinish={saveProvider}
+                  onValuesChange={() => setProviderDirty(true)}
                   initialValues={{
                     provider: "openai",
                     base_url: DEFAULT_PROVIDER_BASE_URLS.openai,
@@ -760,8 +1275,12 @@ export function App() {
                   <Form.Item name="timeout_seconds" label="请求超时秒数">
                     <InputNumber min={3} max={120} />
                   </Form.Item>
-                  <Button type="primary" htmlType="submit">
-                    保存 AI 配置
+                  <Button type={providerDirty ? "primary" : "default"} htmlType="submit" disabled={!providerDirty}>
+                    {providerDirty
+                      ? "保存 AI 配置"
+                      : providers.length > 0
+                        ? "AI 配置已保存，修改后可再次保存"
+                        : "填写后保存 AI 配置"}
                   </Button>
                 </Form>
                 <Divider />
@@ -773,6 +1292,14 @@ export function App() {
                       actions={[
                         <Button key="test" onClick={() => testProvider(item.id)}>
                           连接测试
+                        </Button>,
+                        <Button
+                          key="delete"
+                          danger
+                          loading={deletingProviderId === item.id}
+                          onClick={() => deleteProvider(item.id)}
+                        >
+                          删除
                         </Button>
                       ]}
                     >
@@ -810,7 +1337,27 @@ export function App() {
                   dataSource={resumes}
                   locale={{ emptyText: "暂无简历" }}
                   renderItem={(item) => (
-                    <List.Item>
+                    <List.Item
+                      actions={[
+                        !item.is_default && (
+                          <Button
+                            key="default"
+                            loading={settingDefaultResumeId === item.id}
+                            onClick={() => setDefaultResume(item.id)}
+                          >
+                            设为默认
+                          </Button>
+                        ),
+                        <Button
+                          key="delete"
+                          danger
+                          loading={deletingResumeId === item.id}
+                          onClick={() => deleteResume(item.id)}
+                        >
+                          删除
+                        </Button>
+                      ].filter(Boolean)}
+                    >
                       <List.Item.Meta
                         title={
                           <Space>
@@ -923,6 +1470,27 @@ export function App() {
               </Card>
 
               <Card className="wide-card history-section" title={<CardTitle icon={<History size={18} />} text="搜索历史" />}>
+                <div className="history-toolbar">
+                  <Space wrap>
+                    <Checkbox
+                      checked={isHistoryPageFullySelected}
+                      indeterminate={isHistoryPagePartiallySelected}
+                      disabled={historyPageIds.length === 0}
+                      onChange={(event) => toggleHistoryPageSelection(event.target.checked)}
+                    >
+                      选择本页
+                    </Checkbox>
+                    <Button
+                      danger
+                      disabled={selectedHistoryIds.length === 0}
+                      loading={deletingHistoryBatch}
+                      onClick={deleteSelectedHistorySessions}
+                    >
+                      批量删除{selectedHistoryIds.length > 0 ? `（${selectedHistoryIds.length}）` : ""}
+                    </Button>
+                  </Space>
+                  <Text type="secondary">删除历史只移除搜索记录，不会删除岗位、岗位池和 AI 测评。</Text>
+                </div>
                 <List
                   loading={historyLoading}
                   dataSource={historyData?.items ?? []}
@@ -951,6 +1519,10 @@ export function App() {
                           <List.Item.Meta
                             title={
                               <Space wrap>
+                                <Checkbox
+                                  checked={selectedHistoryIds.includes(item.id)}
+                                  onChange={(event) => toggleHistorySelection(item.id, event.target.checked)}
+                                />
                                 <Text strong>{item.keyword}</Text>
                                 {item.city && <Tag>{item.city}</Tag>}
                                 {item.work_type && <Tag>{workTypeText(item.work_type)}</Tag>}
@@ -969,7 +1541,7 @@ export function App() {
                           {expanded && (
                             <div className="history-detail">
                               {detail
-                                ? renderJobList(detail.jobs, "这次搜索没有可展示岗位。")
+                                ? renderJobList(detail.jobs, "这次搜索没有可展示岗位。", true)
                                 : <Text type="secondary">正在加载这次搜索的岗位...</Text>}
                             </div>
                           )}
@@ -986,6 +1558,411 @@ export function App() {
                   showSizeChanger={false}
                   onChange={(page) => setHistoryPage(page)}
                 />
+              </Card>
+
+              <Card
+                className="wide-card pool-section"
+                title={<CardTitle icon={<BriefcaseBusiness size={18} />} text="岗位池" />}
+                extra={<Button onClick={() => loadJobPool()} loading={jobPoolLoading}>刷新岗位池</Button>}
+              >
+                <Alert
+                  className="pool-guide"
+                  type="info"
+                  showIcon
+                  message="岗位池用于保存你已确认准备投递的岗位"
+                  description="这里会复用同一份岗位和 AI 测评记录；可以从岗位池直接开始岗位专属模拟面试。"
+                />
+                <div className="history-toolbar">
+                  <Space wrap>
+                    <Checkbox
+                      checked={isJobPoolFullySelected}
+                      indeterminate={isJobPoolPartiallySelected}
+                      disabled={filteredJobPoolIds.length === 0}
+                      onChange={(event) => toggleJobPoolPageSelection(event.target.checked)}
+                    >
+                      选择当前列表
+                    </Checkbox>
+                    <Button
+                      danger
+                      icon={<Trash2 size={16} />}
+                      disabled={selectedJobPoolIds.length === 0}
+                      loading={removingJobPoolBatch}
+                      onClick={removeSelectedJobsFromPool}
+                    >
+                      批量移出{selectedJobPoolIds.length > 0 ? `（${selectedJobPoolIds.length}）` : ""}
+                    </Button>
+                  </Space>
+                  <Text type="secondary">只移出岗位池，不删除岗位、AI 测评和面试历史。</Text>
+                </div>
+                <Input.Search
+                  className="pool-filter"
+                  allowClear
+                  placeholder="筛选岗位池：岗位名 / 公司 / 城市 / 标签"
+                  value={jobPoolFilter}
+                  onChange={(event) => setJobPoolFilter(event.target.value)}
+                />
+                <List
+                  loading={jobPoolLoading}
+                  dataSource={filteredJobPool}
+                  locale={{
+                    emptyText: jobPoolFilter
+                      ? "没有匹配当前筛选条件的岗位。"
+                      : "暂无岗位池记录。请先在搜索结果或历史记录中点击“确认投递”。"
+                  }}
+                  renderItem={(item) => {
+                    const evaluation = evaluationsByJobId[item.id];
+                    return (
+                      <List.Item
+                        actions={[
+                          <Button
+                            key="evaluate"
+                            type={evaluation ? "default" : "primary"}
+                            loading={evaluatingJobId === item.id}
+                            onClick={() => evaluateJob(item.id)}
+                          >
+                            {evaluation ? "重新 AI 测评" : "AI 测评"}
+                          </Button>,
+                          <Button
+                            key="interview"
+                            loading={interviewLoadingJobId === item.id}
+                            onClick={() => startInterview(item.id)}
+                          >
+                            开始模拟面试
+                          </Button>
+                        ]}
+                      >
+                        <List.Item.Meta
+                          title={
+                            <Space wrap>
+                              <Checkbox
+                                checked={selectedJobPoolIds.includes(item.id)}
+                                onChange={(event) => toggleJobPoolSelection(item.id, event.target.checked)}
+                              />
+                              <a href={item.job_url} target="_blank" rel="noreferrer">
+                                {item.title}
+                              </a>
+                              <Tag color="green">已确认投递</Tag>
+                              {item.has_interviewed && <Tag color="purple">已模拟面试</Tag>}
+                              {evaluation && (
+                                <Tag color={evaluationTagColor(evaluation.final_score)}>
+                                  {evaluation.recommendation}
+                                </Tag>
+                              )}
+                            </Space>
+                          }
+                          description={
+                            <Space direction="vertical" size={8} className="job-meta-stack">
+                              <Text>
+                                {item.company}
+                                {item.location ? ` / ${item.location}` : ""}
+                                {item.salary ? ` / ${item.salary}` : ""}
+                              </Text>
+                              {item.tags && <Text type="secondary">标签：{item.tags}</Text>}
+                              {evaluation && <EvaluationSummary evaluation={evaluation} />}
+                            </Space>
+                          }
+                        />
+                      </List.Item>
+                    );
+                  }}
+                />
+              </Card>
+
+              <Card
+                className="wide-card current-interview-section"
+                title={<CardTitle icon={<MessageSquareText size={18} />} text="模拟面试" />}
+                extra={
+                  activeInterview?.status === "running" &&
+                  activeInterview.turns.some((turn) => turn.status === "answered") ? (
+                    <Button onClick={finishInterview} loading={answerSubmitting}>
+                      结束并生成报告
+                    </Button>
+                  ) : null
+                }
+              >
+                {!activeInterview ? (
+                  <Alert
+                    type="info"
+                    showIcon
+                    message="请从岗位池选择一个岗位开始模拟面试"
+                    description="当前版本使用本地题库检索和规则评分；已完成的记录请到左侧“面试历史”查看。"
+                  />
+                ) : (
+                  <Space direction="vertical" size={16} className="interview-stack">
+                    <div className="interview-header">
+                      <div>
+                        <Text strong>{activeInterview.job_title}</Text>
+                        <Text type="secondary"> / {activeInterview.company}</Text>
+                      </div>
+                      <Space wrap>
+                        <Tag color={activeInterview.status === "completed" ? "green" : "blue"}>
+                          {activeInterview.status === "completed" ? "已完成" : "进行中"}
+                        </Tag>
+                        <Tag>
+                          主问题 {activeInterview.main_questions_answered}/{activeInterview.max_questions}
+                        </Tag>
+                        <Tag>{activeInterview.retrieval_mode}</Tag>
+                      </Space>
+                    </div>
+
+                    {activeInterview.current_turn && activeInterview.status === "running" && (
+                      <div className="current-question">
+                        <Space wrap className="question-tags">
+                          <Tag color={activeInterview.current_turn.is_followup ? "orange" : "purple"}>
+                            {activeInterview.current_turn.is_followup ? "追问" : "主问题"}
+                          </Tag>
+                          {activeInterview.current_turn.skill_tags.map((tag) => (
+                            <Tag key={tag}>{tag}</Tag>
+                          ))}
+                        </Space>
+                        <Title level={4}>{activeInterview.current_turn.question_text}</Title>
+                        <Form form={interviewAnswerForm} layout="vertical" onFinish={submitInterviewAnswer}>
+                          <Form.Item name="answer_text" rules={[{ required: true, message: "请输入你的回答" }]}>
+                            <Input.TextArea rows={6} placeholder="写下你的回答，尽量包含项目证据、实现步骤和边界说明。" />
+                          </Form.Item>
+                          <Button type="primary" htmlType="submit" loading={answerSubmitting}>
+                            提交回答
+                          </Button>
+                        </Form>
+                      </div>
+                    )}
+
+                    <List
+                      className="turn-list"
+                      dataSource={activeInterview.turns.filter((turn) => turn.status === "answered")}
+                      locale={{ emptyText: "还没有已完成的回答。" }}
+                      renderItem={(turn) => (
+                        <List.Item>
+                          <List.Item.Meta
+                            title={
+                              <Space wrap>
+                                <Text strong>
+                                  第 {turn.turn_index} 轮 · {turn.is_followup ? "追问" : "问题"}
+                                </Text>
+                                {typeof turn.score === "number" && (
+                                  <Tag color={evaluationTagColor(turn.score)}>{turn.score.toFixed(1)} 分</Tag>
+                                )}
+                              </Space>
+                            }
+                            description={
+                              <Space direction="vertical" size={8} className="job-meta-stack">
+                                <Text>{turn.question_text}</Text>
+                                <Text type="secondary">回答：{turn.answer_text}</Text>
+                                {turn.feedback && <Text>{turn.feedback}</Text>}
+                                {turn.evidence.length > 0 && (
+                                  <ul className="compact-list">
+                                    {turn.evidence.map((item) => (
+                                      <li key={item}>{item}</li>
+                                    ))}
+                                  </ul>
+                                )}
+                              </Space>
+                            }
+                          />
+                        </List.Item>
+                      )}
+                    />
+
+                    {activeInterview.report && Number(activeInterview.report.question_count ?? 0) > 0 && (
+                      <div className="interview-report">
+                        <div className="evaluation-header">
+                          <div>
+                            <Text strong>
+                              面试报告 {Number(activeInterview.report.total_score ?? 0).toFixed(1)}/100
+                            </Text>
+                            <Text type="secondary"> · {activeInterview.report.summary}</Text>
+                          </div>
+                          <Tag color={evaluationTagColor(Number(activeInterview.report.total_score ?? 0))}>
+                            {activeInterview.report.question_count ?? 0} 轮回答
+                          </Tag>
+                        </div>
+                        {Boolean(activeInterview.report.covered_skills?.length) && (
+                          <Space wrap className="evaluation-dimensions">
+                            {activeInterview.report.covered_skills?.map((skill) => (
+                              <Tag key={skill}>{skill}</Tag>
+                            ))}
+                          </Space>
+                        )}
+                        <ReportList title="优势" items={activeInterview.report.strengths ?? []} />
+                        <ReportList title="缺口" items={activeInterview.report.gaps ?? []} />
+                        <ReportList title="复习建议" items={activeInterview.report.review_suggestions ?? []} />
+                      </div>
+                    )}
+                  </Space>
+                )}
+              </Card>
+
+              <Card
+                className="wide-card interview-history-section"
+                title={<CardTitle icon={<History size={18} />} text="面试历史" />}
+                extra={<Button onClick={() => loadInterviewHistory()} loading={interviewHistoryLoading}>刷新历史</Button>}
+              >
+                <div className="history-toolbar">
+                  <Space wrap>
+                    <Checkbox
+                      checked={isInterviewHistoryFullySelected}
+                      indeterminate={isInterviewHistoryPartiallySelected}
+                      disabled={interviewHistoryIds.length === 0}
+                      onChange={(event) => toggleInterviewHistoryPageSelection(event.target.checked)}
+                    >
+                      选择全部
+                    </Checkbox>
+                    <Button
+                      danger
+                      icon={<Trash2 size={16} />}
+                      disabled={selectedInterviewHistoryIds.length === 0}
+                      loading={deletingInterviewHistoryBatch}
+                      onClick={deleteSelectedInterviewHistory}
+                    >
+                      批量删除{selectedInterviewHistoryIds.length > 0 ? `（${selectedInterviewHistoryIds.length}）` : ""}
+                    </Button>
+                    <Button onClick={() => setActiveSection("job_pool")}>新增面试</Button>
+                  </Space>
+                  <Text type="secondary">删除面试历史不会删除岗位、岗位池或 AI 测评。</Text>
+                </div>
+                <List
+                  className="interview-history-list"
+                  loading={interviewHistoryLoading}
+                  dataSource={interviewHistory}
+                  locale={{ emptyText: "暂无面试历史。请从岗位池开始一次模拟面试并至少提交一轮回答。" }}
+                  renderItem={(item) => (
+                    <List.Item
+                      actions={[
+                        <Button
+                          key="detail"
+                          loading={loadingInterviewDetailId === item.id}
+                          onClick={() => openInterviewDetail(item.id)}
+                        >
+                          查看详情
+                        </Button>,
+                        <Button
+                          key="delete"
+                          danger
+                          loading={deletingInterviewHistoryId === item.id}
+                          onClick={() => deleteInterviewHistory(item.id)}
+                        >
+                          删除记录
+                        </Button>
+                      ]}
+                    >
+                      <List.Item.Meta
+                        title={
+                          <Space wrap>
+                            <Checkbox
+                              checked={selectedInterviewHistoryIds.includes(item.id)}
+                              onChange={(event) => toggleInterviewHistorySelection(item.id, event.target.checked)}
+                            />
+                            <Text strong>{item.job_title}</Text>
+                            <Text type="secondary">/ {item.company}</Text>
+                            <Tag color={item.status === "completed" ? "green" : "blue"}>
+                              {item.status === "completed" ? "已完成" : "进行中"}
+                            </Tag>
+                            {typeof item.total_score === "number" && (
+                              <Tag color={evaluationTagColor(item.total_score)}>
+                                {item.total_score.toFixed(1)} 分
+                              </Tag>
+                            )}
+                          </Space>
+                        }
+                        description={
+                          <Space direction="vertical" size={4}>
+                            <Text type="secondary">
+                              {item.location ? `${item.location} · ` : ""}
+                              {item.salary ? `${item.salary} · ` : ""}
+                              面试时间：{formatDateTime(item.created_at)}
+                              {item.completed_at ? ` · 完成：${formatDateTime(item.completed_at)}` : ""}
+                            </Text>
+                            <Text type="secondary">
+                              已答 {item.question_count} 轮，主问题 {item.main_questions_answered} 轮
+                            </Text>
+                          </Space>
+                        }
+                      />
+                    </List.Item>
+                  )}
+                />
+                {activeInterview ? (
+                  <>
+                    <Divider />
+                    <Space direction="vertical" size={16} className="interview-stack">
+                      <div className="interview-header">
+                        <div>
+                          <Text strong>{activeInterview.job_title}</Text>
+                          <Text type="secondary"> / {activeInterview.company}</Text>
+                        </div>
+                        <Space wrap>
+                          <Tag color={activeInterview.status === "completed" ? "green" : "blue"}>
+                            {activeInterview.status === "completed" ? "已完成" : "进行中"}
+                          </Tag>
+                          <Tag>
+                            主问题 {activeInterview.main_questions_answered}/{activeInterview.max_questions}
+                          </Tag>
+                          <Tag>{activeInterview.retrieval_mode}</Tag>
+                        </Space>
+                      </div>
+                      <List
+                        className="turn-list"
+                        dataSource={activeInterview.turns.filter((turn) => turn.status === "answered")}
+                        locale={{ emptyText: "这条面试还没有已完成的回答。" }}
+                        renderItem={(turn) => (
+                          <List.Item>
+                            <List.Item.Meta
+                              title={
+                                <Space wrap>
+                                  <Text strong>
+                                    第 {turn.turn_index} 轮 · {turn.is_followup ? "追问" : "问题"}
+                                  </Text>
+                                  {typeof turn.score === "number" && (
+                                    <Tag color={evaluationTagColor(turn.score)}>{turn.score.toFixed(1)} 分</Tag>
+                                  )}
+                                </Space>
+                              }
+                              description={
+                                <Space direction="vertical" size={8} className="job-meta-stack">
+                                  <Text>{turn.question_text}</Text>
+                                  <Text type="secondary">回答：{turn.answer_text}</Text>
+                                  {turn.feedback && <Text>{turn.feedback}</Text>}
+                                  {turn.evidence.length > 0 && (
+                                    <ul className="compact-list">
+                                      {turn.evidence.map((item) => (
+                                        <li key={item}>{item}</li>
+                                      ))}
+                                    </ul>
+                                  )}
+                                </Space>
+                              }
+                            />
+                          </List.Item>
+                        )}
+                      />
+                      {activeInterview.report && Number(activeInterview.report.question_count ?? 0) > 0 && (
+                        <div className="interview-report">
+                          <div className="evaluation-header">
+                            <div>
+                              <Text strong>
+                                面试报告 {Number(activeInterview.report.total_score ?? 0).toFixed(1)}/100
+                              </Text>
+                              <Text type="secondary"> · {activeInterview.report.summary}</Text>
+                            </div>
+                            <Tag color={evaluationTagColor(Number(activeInterview.report.total_score ?? 0))}>
+                              {activeInterview.report.question_count ?? 0} 轮回答
+                            </Tag>
+                          </div>
+                          {Boolean(activeInterview.report.covered_skills?.length) && (
+                            <Space wrap className="evaluation-dimensions">
+                              {activeInterview.report.covered_skills?.map((skill) => (
+                                <Tag key={skill}>{skill}</Tag>
+                              ))}
+                            </Space>
+                          )}
+                          <ReportList title="优势" items={activeInterview.report.strengths ?? []} />
+                          <ReportList title="缺口" items={activeInterview.report.gaps ?? []} />
+                          <ReportList title="复习建议" items={activeInterview.report.review_suggestions ?? []} />
+                        </div>
+                      )}
+                    </Space>
+                  </>
+                ) : null}
               </Card>
                 </div>
               </main>
@@ -1079,6 +2056,20 @@ function EvaluationSummary({ evaluation }: { evaluation: JobEvaluation }) {
   );
 }
 
+function ReportList({ title, items }: { title: string; items: string[] }) {
+  if (items.length === 0) return null;
+  return (
+    <div className="evaluation-block">
+      <Text strong>{title}：</Text>
+      <ul className="compact-list">
+        {items.map((item) => (
+          <li key={item}>{item}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function evaluationTagColor(score: number) {
   if (score >= 85) return "green";
   if (score >= 70) return "blue";
@@ -1109,12 +2100,18 @@ function networkModeText(mode: ModelProvider["network_mode"]) {
 function sectionTitle(section: SectionKey) {
   if (section === "config") return "基础配置";
   if (section === "history") return "搜索历史";
+  if (section === "job_pool") return "岗位池";
+  if (section === "interview") return "模拟面试";
+  if (section === "interview_history") return "面试历史";
   return "岗位搜索";
 }
 
 function sectionDescription(section: SectionKey) {
   if (section === "config") return "维护个人求职偏好、AI 模型和默认简历，后续评测都会读取这里的配置。";
   if (section === "history") return "按搜索时间倒序查看每次采集记录；展开后可继续 AI 测评或后续投递。";
+  if (section === "job_pool") return "集中管理已确认投递岗位，并复用同一份 AI 测评和简历建议。";
+  if (section === "interview") return "围绕岗位 JD、默认简历和题库进行多轮问答，并在结束后生成评分报告。";
+  if (section === "interview_history") return "独立查看、删除和批量管理已提交过回答的模拟面试记录。";
   return "先按关键词从 Boss 直聘采集岗位，再按工作形式和相关性过滤结果。";
 }
 

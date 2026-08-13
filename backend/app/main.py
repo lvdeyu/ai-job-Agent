@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes.auth import router as auth_router
 from app.api.routes.health import router as health_router
+from app.api.routes.interviews import router as interviews_router
 from app.api.routes.job_collections import router as job_collections_router
 from app.api.routes.jobs import router as jobs_router
 from app.api.routes.model_providers import router as model_providers_router
@@ -30,6 +31,7 @@ def create_app() -> FastAPI:
     app.include_router(resumes_router, prefix=settings.api_v1_prefix)
     app.include_router(job_collections_router, prefix=settings.api_v1_prefix)
     app.include_router(jobs_router, prefix=settings.api_v1_prefix)
+    app.include_router(interviews_router, prefix=settings.api_v1_prefix)
     return app
 
 

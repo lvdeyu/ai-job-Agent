@@ -155,10 +155,34 @@ body {
 
 .show-config .job-section,
 .show-config .history-section,
+.show-config .pool-section,
+.show-config .current-interview-section,
+.show-config .interview-history-section,
 .show-job_search .config-section,
 .show-job_search .history-section,
+.show-job_search .pool-section,
+.show-job_search .current-interview-section,
+.show-job_search .interview-history-section,
 .show-history .config-section,
-.show-history .job-section {
+.show-history .job-section,
+.show-history .pool-section,
+.show-history .current-interview-section,
+.show-history .interview-history-section,
+.show-job_pool .config-section,
+.show-job_pool .job-section,
+.show-job_pool .history-section,
+.show-job_pool .current-interview-section,
+.show-job_pool .interview-history-section,
+.show-interview .config-section,
+.show-interview .job-section,
+.show-interview .history-section,
+.show-interview .pool-section,
+.show-interview .interview-history-section,
+.show-interview_history .config-section,
+.show-interview_history .job-section,
+.show-interview_history .history-section,
+.show-interview_history .pool-section,
+.show-interview_history .current-interview-section {
   display: none;
 }
 
@@ -225,6 +249,18 @@ body {
   margin-left: 16px;
 }
 
+.history-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border: 1px solid #e6f0ff;
+  border-radius: 12px;
+  background: #f8fbff;
+}
+
 .history-row {
   width: 100%;
 }
@@ -240,6 +276,52 @@ body {
 .history-pagination {
   margin-top: 16px;
   text-align: right;
+}
+
+.pool-guide {
+  margin-bottom: 14px;
+}
+
+.pool-filter {
+  margin-bottom: 14px;
+}
+
+.interview-stack {
+  width: 100%;
+}
+
+.interview-history-list {
+  margin-bottom: 12px;
+}
+
+.interview-header,
+.current-question,
+.interview-report {
+  padding: 14px 16px;
+  border: 1px solid #dbeafe;
+  border-radius: 12px;
+  background: #f8fbff;
+}
+
+.interview-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.question-tags {
+  margin-bottom: 8px;
+}
+
+.turn-list {
+  width: 100%;
+}
+
+.compact-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  color: #475467;
 }
 
 .evaluation-panel {

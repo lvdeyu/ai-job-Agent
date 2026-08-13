@@ -128,3 +128,81 @@ def test_user_isolation_for_resumes(client: TestClient) -> None:
         headers={"Authorization": f"Bearer {token_b}"},
     )
     assert forbidden.status_code == 404
+
+
+def test_model_provider_can_be_deleted(client: TestClient) -> None:
+    token = _register_and_login(client, "delete-provider@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    provider = client.post(
+        "/api/v1/model-providers",
+        headers=headers,
+        json={
+            "provider": "deepseek",
+            "api_key": "sk-local-test-delete-provider",
+            "model_name": "deepseek-chat",
+            "base_url": "https://api.deepseek.com",
+            "timeout_seconds": 30,
+            "network_mode": "auto",
+        },
+    )
+    assert provider.status_code == 200, provider.text
+
+    delete_response = client.delete(
+        f"/api/v1/model-providers/{provider.json()['id']}",
+        headers=headers,
+    )
+    assert delete_response.status_code == 204
+
+    providers = client.get("/api/v1/model-providers", headers=headers)
+    assert providers.status_code == 200
+    assert providers.json() == []
+
+
+def test_resume_can_be_deleted_and_default_moves_to_remaining_resume(
+    client: TestClient,
+) -> None:
+    token = _register_and_login(client, "delete-resume@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    first_resume = client.post(
+        "/api/v1/resumes/upload",
+        headers=headers,
+        files={"file": ("first.md", b"First resume Python Agent", "text/markdown")},
+    )
+    assert first_resume.status_code == 201, first_resume.text
+    second_resume = client.post(
+        "/api/v1/resumes/upload",
+        headers=headers,
+        files={"file": ("second.md", b"Second resume Java Spring", "text/markdown")},
+    )
+    assert second_resume.status_code == 201, second_resume.text
+
+    uploaded_resumes = client.get("/api/v1/resumes", headers=headers)
+    assert uploaded_resumes.status_code == 200
+    assert len(uploaded_resumes.json()) == 2
+    uploaded_files = [
+        path for path in Path(settings.resume_storage_dir).rglob("*") if path.is_file()
+    ]
+    assert len(uploaded_files) == 2
+    default_resume = next(item for item in uploaded_resumes.json() if item["is_default"])
+    assert default_resume["id"] == first_resume.json()["id"]
+
+    delete_response = client.delete(
+        f"/api/v1/resumes/{first_resume.json()['id']}",
+        headers=headers,
+    )
+    assert delete_response.status_code == 204
+
+    remaining = client.get("/api/v1/resumes", headers=headers)
+    assert remaining.status_code == 200
+    body = remaining.json()
+    assert len(body) == 1
+    assert body[0]["id"] == second_resume.json()["id"]
+    assert body[0]["is_default"] is True
+    assert Path(settings.resume_storage_dir).exists()
+    remaining_files = [
+        path for path in Path(settings.resume_storage_dir).rglob("*") if path.is_file()
+    ]
+    assert len(remaining_files) == 1
+    assert remaining_files[0].name.startswith("second_")

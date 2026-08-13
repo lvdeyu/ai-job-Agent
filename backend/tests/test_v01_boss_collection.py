@@ -490,6 +490,68 @@ def test_collection_history_can_be_deleted_without_deleting_jobs(client: TestCli
     assert [job["title"] for job in jobs.json()] == ["Java 后端开发工程师"]
 
 
+def test_collection_history_can_be_deleted_in_batch(client: TestClient) -> None:
+    token_a = _register_and_login(client, "collection-history-batch-delete-a@example.com")
+    token_b = _register_and_login(client, "collection-history-batch-delete-b@example.com")
+    headers_a = {"Authorization": f"Bearer {token_a}"}
+    headers_b = {"Authorization": f"Bearer {token_b}"}
+
+    owned_session_ids = []
+    for index in range(2):
+        session = client.post(
+            "/api/v1/job-collections/sessions",
+            headers=headers_a,
+            json={"keyword": "java", "city": "济南", "work_type": "full_time", "limit": 10},
+        ).json()
+        owned_session_ids.append(session["id"])
+        submit = client.post(
+            f"/api/v1/job-collections/sessions/{session['id']}/jobs",
+            json={
+                "collection_token": session["collection_token"],
+                "jobs": [
+                    {
+                        "title": f"Java 后端开发工程师 {index}",
+                        "company": f"批量删除测试公司 {index}",
+                        "location": "济南",
+                        "tags": ["Java", "Spring Boot"],
+                        "description": "负责 Java 后端开发。",
+                    }
+                ],
+            },
+        )
+        assert submit.status_code == 200, submit.text
+
+    other_session = client.post(
+        "/api/v1/job-collections/sessions",
+        headers=headers_b,
+        json={"keyword": "java", "city": "济南", "limit": 10},
+    ).json()
+
+    delete_response = client.request(
+        "DELETE",
+        "/api/v1/job-collections/sessions",
+        headers=headers_a,
+        json={"session_ids": [*owned_session_ids, other_session["id"], "missing-session"]},
+    )
+    assert delete_response.status_code == 200, delete_response.text
+    assert delete_response.json()["deleted_count"] == 2
+
+    history_a = client.get("/api/v1/job-collections/sessions", headers=headers_a)
+    assert history_a.status_code == 200
+    assert history_a.json()["items"] == []
+
+    history_b = client.get("/api/v1/job-collections/sessions", headers=headers_b)
+    assert history_b.status_code == 200
+    assert [item["id"] for item in history_b.json()["items"]] == [other_session["id"]]
+
+    jobs_a = client.get("/api/v1/jobs", headers=headers_a)
+    assert jobs_a.status_code == 200
+    assert sorted(job["title"] for job in jobs_a.json()) == [
+        "Java 后端开发工程师 0",
+        "Java 后端开发工程师 1",
+    ]
+
+
 def test_collection_history_delete_is_user_scoped(client: TestClient) -> None:
     token_a = _register_and_login(client, "collection-history-delete-a@example.com")
     token_b = _register_and_login(client, "collection-history-delete-b@example.com")
@@ -513,3 +575,128 @@ def test_collection_history_delete_is_user_scoped(client: TestClient) -> None:
         headers=headers_a,
     )
     assert owner_detail.status_code == 200
+
+
+def test_job_can_be_added_to_pool_and_keeps_pool_marker_on_duplicate_search(
+    client: TestClient,
+) -> None:
+    token = _register_and_login(client, "job-pool@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    first_session = client.post(
+        "/api/v1/job-collections/sessions",
+        headers=headers,
+        json={"keyword": "java", "city": "济南", "work_type": "full_time", "limit": 10},
+    ).json()
+    first_submit = client.post(
+        f"/api/v1/job-collections/sessions/{first_session['id']}/jobs",
+        json={
+            "collection_token": first_session["collection_token"],
+            "jobs": [
+                {
+                    "title": "Java 后端开发工程师",
+                    "company": "岗位池测试公司",
+                    "location": "济南",
+                    "tags": ["Java", "Spring Boot"],
+                    "description": "负责 Java 后端、Spring Boot 和数据库开发。",
+                    "job_url": "https://www.zhipin.com/job_detail/pool-demo.html",
+                }
+            ],
+        },
+    )
+    assert first_submit.status_code == 200, first_submit.text
+    job = client.get("/api/v1/jobs", headers=headers).json()[0]
+    assert job["is_in_pool"] is False
+
+    add_to_pool = client.post(f"/api/v1/jobs/{job['id']}/pool", headers=headers)
+    assert add_to_pool.status_code == 200, add_to_pool.text
+    assert add_to_pool.json()["is_in_pool"] is True
+
+    idempotent_add = client.post(f"/api/v1/jobs/{job['id']}/pool", headers=headers)
+    assert idempotent_add.status_code == 200
+    assert idempotent_add.json()["is_in_pool"] is True
+
+    pool = client.get("/api/v1/jobs/pool", headers=headers)
+    assert pool.status_code == 200
+    assert [item["id"] for item in pool.json()] == [job["id"]]
+
+    second_session = client.post(
+        "/api/v1/job-collections/sessions",
+        headers=headers,
+        json={"keyword": "java", "city": "济南", "work_type": "full_time", "limit": 10},
+    ).json()
+    second_submit = client.post(
+        f"/api/v1/job-collections/sessions/{second_session['id']}/jobs",
+        json={
+            "collection_token": second_session["collection_token"],
+            "jobs": [
+                {
+                    "title": "Java 后端开发工程师",
+                    "company": "岗位池测试公司",
+                    "location": "济南",
+                    "tags": ["Java", "Spring Boot"],
+                    "description": "负责 Java 后端、Spring Boot 和数据库开发。",
+                    "job_url": "https://www.zhipin.com/job_detail/pool-demo.html",
+                }
+            ],
+        },
+    )
+    assert second_submit.status_code == 200, second_submit.text
+    assert second_submit.json()["duplicated"] == 1
+
+    session_detail = client.get(
+        f"/api/v1/job-collections/sessions/{second_session['id']}",
+        headers=headers,
+    )
+    assert session_detail.status_code == 200
+    assert session_detail.json()["jobs"][0]["is_in_pool"] is True
+
+
+def test_job_pool_can_remove_jobs_in_batch_without_deleting_jobs(client: TestClient) -> None:
+    token = _register_and_login(client, "job-pool-batch-remove@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    job_ids: list[str] = []
+
+    for index in range(2):
+        session = client.post(
+            "/api/v1/job-collections/sessions",
+            headers=headers,
+            json={"keyword": "java", "city": "济南", "work_type": "full_time", "limit": 10},
+        ).json()
+        submit = client.post(
+            f"/api/v1/job-collections/sessions/{session['id']}/jobs",
+            json={
+                "collection_token": session["collection_token"],
+                "jobs": [
+                    {
+                        "title": f"Java 后端开发工程师 {index}",
+                        "company": f"岗位池批量移除公司 {index}",
+                        "location": "济南",
+                        "tags": ["Java"],
+                        "description": "负责 Java 后端开发。",
+                    }
+                ],
+            },
+        )
+        assert submit.status_code == 200, submit.text
+        job = client.get("/api/v1/jobs", headers=headers).json()[0]
+        add_to_pool = client.post(f"/api/v1/jobs/{job['id']}/pool", headers=headers)
+        assert add_to_pool.status_code == 200
+        job_ids.append(job["id"])
+
+    remove_response = client.request(
+        "DELETE",
+        "/api/v1/jobs/pool",
+        headers=headers,
+        json={"job_ids": job_ids},
+    )
+    assert remove_response.status_code == 200, remove_response.text
+    assert remove_response.json()["removed_count"] == 2
+
+    pool = client.get("/api/v1/jobs/pool", headers=headers)
+    assert pool.status_code == 200
+    assert pool.json() == []
+
+    jobs = client.get("/api/v1/jobs", headers=headers)
+    assert jobs.status_code == 200
+    assert len(jobs.json()) == 2
