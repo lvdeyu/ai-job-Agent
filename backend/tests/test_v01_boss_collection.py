@@ -679,7 +679,8 @@ def test_job_pool_can_remove_jobs_in_batch_without_deleting_jobs(client: TestCli
             },
         )
         assert submit.status_code == 200, submit.text
-        job = client.get("/api/v1/jobs", headers=headers).json()[0]
+        jobs = client.get("/api/v1/jobs", headers=headers).json()
+        job = next(job for job in jobs if job["title"] == f"Java 后端开发工程师 {index}")
         add_to_pool = client.post(f"/api/v1/jobs/{job['id']}/pool", headers=headers)
         assert add_to_pool.status_code == 200
         job_ids.append(job["id"])

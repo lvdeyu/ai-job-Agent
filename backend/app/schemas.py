@@ -174,6 +174,14 @@ class DeleteJobPoolJobsResponse(BaseModel):
     removed_count: int
 
 
+class TaskStatusItemResponse(BaseModel):
+    name: str
+    status: str
+    backend: str
+    detail: str
+    updated_at: datetime | None = None
+
+
 class CollectedJobItem(BaseModel):
     title: str = Field(min_length=1, max_length=180)
     company: str = Field(min_length=1, max_length=180)
@@ -284,6 +292,7 @@ class InterviewSessionResponse(BaseModel):
     current_turn: InterviewTurnResponse | None = None
     turns: list[InterviewTurnResponse]
     report: dict[str, Any] | None = None
+    checkpoint: dict[str, Any]
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None = None

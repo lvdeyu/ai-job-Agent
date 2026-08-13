@@ -11,11 +11,19 @@ from app.api.routes.jobs import router as jobs_router
 from app.api.routes.model_providers import router as model_providers_router
 from app.api.routes.profile import router as profile_router
 from app.api.routes.resumes import router as resumes_router
+from app.api.routes.tasks import router as tasks_router
 from app.core.config import settings
+from app.core.observability import (
+    RequestContextMiddleware,
+    configure_logging,
+    register_error_handlers,
+)
 
 
 def create_app() -> FastAPI:
+    configure_logging()
     app = FastAPI(title=settings.app_name)
+    app.add_middleware(RequestContextMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
@@ -32,6 +40,8 @@ def create_app() -> FastAPI:
     app.include_router(job_collections_router, prefix=settings.api_v1_prefix)
     app.include_router(jobs_router, prefix=settings.api_v1_prefix)
     app.include_router(interviews_router, prefix=settings.api_v1_prefix)
+    app.include_router(tasks_router, prefix=settings.api_v1_prefix)
+    register_error_handlers(app)
     return app
 
 

@@ -33,6 +33,7 @@ def test_interview_runs_from_job_pool_to_report(client: TestClient) -> None:
     session = start.json()
     assert session["job_id"] == job_id
     assert session["status"] == "running"
+    assert session["retrieval_mode"] == "pgvector-fallback-v1"
     assert session["current_turn"]["question_text"]
     assert session["current_turn"]["question_bank_item_external_id"]
 
@@ -67,6 +68,7 @@ def test_interview_runs_from_job_pool_to_report(client: TestClient) -> None:
     assert completed["status"] == "completed"
     assert completed["report"]["total_score"] > 0
     assert completed["report"]["evidence"]
+    assert completed["report"]["evidence"][0]["source_question_id"]
     assert completed["main_questions_answered"] == 2
 
     history = client.get("/api/v1/interviews/history", headers=headers)
@@ -139,7 +141,7 @@ def test_interview_requires_job_pool_and_default_resume(client: TestClient) -> N
         json={"job_id": job_id, "max_questions": 2},
     )
     assert no_pool.status_code == 422
-    assert "岗位池" in no_pool.json()["detail"]
+    assert "岗位池" in no_pool.json()["error"]["message"]
 
     add_to_pool = client.post(f"/api/v1/jobs/{job_id}/pool", headers=headers)
     assert add_to_pool.status_code == 200
@@ -149,7 +151,7 @@ def test_interview_requires_job_pool_and_default_resume(client: TestClient) -> N
         json={"job_id": job_id, "max_questions": 2},
     )
     assert no_resume.status_code == 422
-    assert "默认简历" in no_resume.json()["detail"]
+    assert "默认简历" in no_resume.json()["error"]["message"]
 
 
 def test_user_cannot_access_other_users_interview(client: TestClient) -> None:

@@ -25,7 +25,14 @@ const { Header, Content } = Layout;
 const { Title, Paragraph, Text } = Typography;
 
 const API_BASE = "http://127.0.0.1:18000/api/v1";
-type SectionKey = "config" | "job_search" | "history" | "job_pool" | "interview" | "interview_history";
+type SectionKey =
+  | "config"
+  | "job_search"
+  | "history"
+  | "job_pool"
+  | "interview"
+  | "interview_history"
+  | "tasks";
 const DEFAULT_PROVIDER_BASE_URLS: Record<string, string> = {
   openai: "https://api.openai.com/v1",
   tongyi: "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -216,6 +223,13 @@ interface InterviewSession {
     review_suggestions?: string[];
     covered_skills?: string[];
   };
+  checkpoint: {
+    mode: string;
+    status: string;
+    resume_session_id: string;
+    current_turn_id?: string;
+    answered_turn_count: number;
+  };
 }
 
 interface InterviewHistoryItem {
@@ -233,6 +247,14 @@ interface InterviewHistoryItem {
   completed_at?: string;
 }
 
+interface TaskStatusItem {
+  name: string;
+  status: string;
+  backend: string;
+  detail: string;
+  updated_at?: string;
+}
+
 interface ExtensionResponse {
   ok: boolean;
   created?: number;
@@ -245,7 +267,14 @@ interface ExtensionResponse {
 }
 
 function errorMessage(error: unknown) {
-  const axiosError = error as AxiosError<{ detail?: string }>;
+  const axiosError = error as AxiosError<{
+    detail?: string;
+    error?: { message?: string; request_id?: string };
+  }>;
+  const apiError = axiosError.response?.data?.error;
+  if (apiError?.message) {
+    return apiError.request_id ? `${apiError.message}（request_id: ${apiError.request_id}）` : apiError.message;
+  }
   return axiosError.response?.data?.detail ?? axiosError.message ?? "请求失败";
 }
 
@@ -292,6 +321,8 @@ export function App() {
   const [selectedInterviewHistoryIds, setSelectedInterviewHistoryIds] = useState<string[]>([]);
   const [deletingInterviewHistoryId, setDeletingInterviewHistoryId] = useState<string | null>(null);
   const [deletingInterviewHistoryBatch, setDeletingInterviewHistoryBatch] = useState(false);
+  const [taskStatuses, setTaskStatuses] = useState<TaskStatusItem[]>([]);
+  const [taskStatusesLoading, setTaskStatusesLoading] = useState(false);
   const [answerSubmitting, setAnswerSubmitting] = useState(false);
   const [profileForm] = Form.useForm<Profile>();
   const [providerForm] = Form.useForm();
@@ -389,6 +420,13 @@ export function App() {
   useEffect(() => {
     if (!token || activeSection !== "interview_history") return;
     loadInterviewHistory().catch((error) => {
+      setMessage({ type: "error", text: errorMessage(error) });
+    });
+  }, [token, activeSection]);
+
+  useEffect(() => {
+    if (!token || activeSection !== "tasks") return;
+    loadTaskStatuses().catch((error) => {
       setMessage({ type: "error", text: errorMessage(error) });
     });
   }, [token, activeSection]);
@@ -666,6 +704,17 @@ export function App() {
       setInterviewHistory(response.data);
     } finally {
       setInterviewHistoryLoading(false);
+    }
+  }
+
+  async function loadTaskStatuses() {
+    if (!token) return;
+    setTaskStatusesLoading(true);
+    try {
+      const response = await api.get<TaskStatusItem[]>("/tasks/status");
+      setTaskStatuses(response.data);
+    } finally {
+      setTaskStatusesLoading(false);
     }
   }
 
@@ -1080,7 +1129,7 @@ export function App() {
           <Space>
             <Bot size={22} />
             <Text className="brand">ai-job-AGENT</Text>
-            <Tag color="blue">V0.1-4 岗位池</Tag>
+            <Tag color="blue">V0.1 本地闭环</Tag>
           </Space>
           {user && (
             <Space>
@@ -1162,6 +1211,13 @@ export function App() {
                 >
                   <History size={18} />
                   <span>面试历史</span>
+                </button>
+                <button
+                  className={`sidebar-item ${activeSection === "tasks" ? "active" : ""}`}
+                  onClick={() => setActiveSection("tasks")}
+                >
+                  <ShieldCheck size={18} />
+                  <span>任务状态</span>
                 </button>
               </aside>
               <main className={`workspace-panel show-${activeSection}`}>
@@ -1702,6 +1758,7 @@ export function App() {
                           主问题 {activeInterview.main_questions_answered}/{activeInterview.max_questions}
                         </Tag>
                         <Tag>{activeInterview.retrieval_mode}</Tag>
+                        <Tag>{activeInterview.checkpoint.mode}</Tag>
                       </Space>
                     </div>
 
@@ -1898,6 +1955,7 @@ export function App() {
                             主问题 {activeInterview.main_questions_answered}/{activeInterview.max_questions}
                           </Tag>
                           <Tag>{activeInterview.retrieval_mode}</Tag>
+                          <Tag>{activeInterview.checkpoint.mode}</Tag>
                         </Space>
                       </div>
                       <List
@@ -1963,6 +2021,37 @@ export function App() {
                     </Space>
                   </>
                 ) : null}
+              </Card>
+
+              <Card
+                className="wide-card tasks-section"
+                title={<CardTitle icon={<ShieldCheck size={18} />} text="任务状态" />}
+                extra={<Button onClick={() => loadTaskStatuses()} loading={taskStatusesLoading}>刷新状态</Button>}
+              >
+                <List
+                  loading={taskStatusesLoading}
+                  dataSource={taskStatuses}
+                  locale={{ emptyText: "暂无任务状态。" }}
+                  renderItem={(item) => (
+                    <List.Item>
+                      <List.Item.Meta
+                        title={
+                          <Space wrap>
+                            <Text strong>{item.name}</Text>
+                            <Tag color={taskStatusColor(item.status)}>{taskStatusText(item.status)}</Tag>
+                            <Tag>{item.backend}</Tag>
+                          </Space>
+                        }
+                        description={
+                          <Space direction="vertical" size={4}>
+                            <Text>{item.detail}</Text>
+                            {item.updated_at && <Text type="secondary">更新时间：{formatDateTime(item.updated_at)}</Text>}
+                          </Space>
+                        }
+                      />
+                    </List.Item>
+                  )}
+                />
               </Card>
                 </div>
               </main>
@@ -2077,6 +2166,27 @@ function evaluationTagColor(score: number) {
   return "red";
 }
 
+function taskStatusColor(status: string) {
+  if (["running", "success", "completed"].includes(status)) return "green";
+  if (["not_enabled", "no_task"].includes(status)) return "default";
+  if (["partial_success"].includes(status)) return "blue";
+  if (["auth_required", "captcha_required", "rate_limited"].includes(status.toLowerCase())) return "orange";
+  return "red";
+}
+
+function taskStatusText(status: string) {
+  const names: Record<string, string> = {
+    running: "运行中",
+    not_enabled: "未启用",
+    no_task: "暂无任务",
+    completed: "已完成",
+    success: "成功",
+    partial_success: "部分成功",
+    failed: "失败"
+  };
+  return names[status.toLowerCase()] ?? status;
+}
+
 function evaluationDimensionName(key: string) {
   const names: Record<string, string> = {
     skill_match: "技能",
@@ -2103,6 +2213,7 @@ function sectionTitle(section: SectionKey) {
   if (section === "job_pool") return "岗位池";
   if (section === "interview") return "模拟面试";
   if (section === "interview_history") return "面试历史";
+  if (section === "tasks") return "任务状态";
   return "岗位搜索";
 }
 
@@ -2112,6 +2223,7 @@ function sectionDescription(section: SectionKey) {
   if (section === "job_pool") return "集中管理已确认投递岗位，并复用同一份 AI 测评和简历建议。";
   if (section === "interview") return "围绕岗位 JD、默认简历和题库进行多轮问答，并在结束后生成评分报告。";
   if (section === "interview_history") return "独立查看、删除和批量管理已提交过回答的模拟面试记录。";
+  if (section === "tasks") return "查看本地任务执行器、Celery 队列状态、最近采集和最近模拟面试。";
   return "先按关键词从 Boss 直聘采集岗位，再按工作形式和相关性过滤结果。";
 }
 

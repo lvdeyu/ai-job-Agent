@@ -56,7 +56,7 @@ def create_interview_session(
         resume_version_id=resume_version.id,
         job_evaluation_id=latest_evaluation.id if latest_evaluation else None,
         status="running",
-        retrieval_mode=RETRIEVAL_MODE,
+        retrieval_mode=active_retrieval_mode(db),
         scoring_mode=SCORING_MODE,
         max_questions=max_questions,
         main_questions_answered=0,
@@ -225,10 +225,37 @@ def retrieve_interview_questions(
 ) -> list[QuestionBankItem]:
     items = db.scalars(select(QuestionBankItem)).all()
     context = _retrieval_context(job, resume_version, evaluation)
-    scored = [(_question_score(item, context), item) for item in items]
-    scored.sort(key=lambda pair: (-pair[0], pair[1].external_id))
-    relevant_items = [item for score, item in scored[:limit] if score > 0]
-    return relevant_items or [item for _, item in scored[:limit]]
+    context_embedding = deterministic_embedding(context)
+    scored = []
+    for item in items:
+        scored.append(
+            (
+                _question_score(item, context),
+                _embedding_similarity(item.embedding, context_embedding),
+                item,
+            )
+        )
+    scored.sort(key=lambda pair: (-pair[1], -pair[0], pair[2].external_id))
+    relevant_items = [
+        item
+        for keyword_score, similarity, item in scored[:limit]
+        if keyword_score > 0 or similarity > 0
+    ]
+    return relevant_items or [item for _, _, item in scored[:limit]]
+
+
+def active_retrieval_mode(db: Session) -> str:
+    has_embedding = (
+        db.scalar(
+            select(QuestionBankItem.id)
+            .where(QuestionBankItem.embedding.is_not(None))
+            .limit(1)
+        )
+        is not None
+    )
+    if has_embedding:
+        return "pgvector-fallback-v1"
+    return RETRIEVAL_MODE
 
 
 def evaluate_interview_answer(turn: InterviewTurn, answer_text: str) -> dict[str, Any]:
@@ -369,6 +396,8 @@ def seed_question_bank_if_needed(db: Session) -> int:
                 scoring_rubric_json=_dump(item["scoring_rubric"]),
                 followup_suggestions_json=_dump(item["followup_suggestions"]),
                 embedding_text=item["embedding_text"],
+                embedding=_dump(deterministic_embedding(item["embedding_text"])),
+                embedding_model="local-hash-embedding-v1",
                 source_json=_dump(item["source"]),
                 version=item["version"],
                 content_hash=_stable_hash(item),
@@ -492,6 +521,30 @@ def _question_score(item: QuestionBankItem, context: str) -> int:
     if item.question_type == "project_deep_dive" and "项目" in context:
         score += 3
     return score
+
+
+def deterministic_embedding(text: str, dimensions: int = 32) -> list[float]:
+    vector = [0.0 for _ in range(dimensions)]
+    for token in _tokens(text):
+        bucket = int(hashlib.sha256(token.encode("utf-8")).hexdigest()[:8], 16) % dimensions
+        vector[bucket] += 1.0
+    norm = sum(value * value for value in vector) ** 0.5
+    if norm == 0:
+        return vector
+    return [round(value / norm, 6) for value in vector]
+
+
+def _embedding_similarity(raw_embedding: str | None, context_embedding: list[float]) -> float:
+    if not raw_embedding:
+        return 0.0
+    try:
+        embedding = json.loads(raw_embedding)
+    except json.JSONDecodeError:
+        return 0.0
+    if not isinstance(embedding, list):
+        return 0.0
+    pairs = zip(embedding, context_embedding, strict=False)
+    return round(sum(float(left) * float(right) for left, right in pairs), 6)
 
 
 def _load_seed_items() -> list[dict[str, Any]]:

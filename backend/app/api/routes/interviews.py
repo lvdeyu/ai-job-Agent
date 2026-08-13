@@ -167,6 +167,13 @@ def _session_response(session: InterviewSession) -> InterviewSessionResponse:
         current_turn=_turn_response(open_turn) if open_turn else None,
         turns=[_turn_response(turn) for turn in session.turns],
         report=_load(session.report_json, None),
+        checkpoint={
+            "mode": "sqlalchemy-session-checkpoint-v1",
+            "status": session.status,
+            "resume_session_id": session.id,
+            "current_turn_id": open_turn.id if open_turn else None,
+            "answered_turn_count": _answered_count(session),
+        },
         created_at=session.created_at,
         updated_at=session.updated_at,
         completed_at=session.completed_at,

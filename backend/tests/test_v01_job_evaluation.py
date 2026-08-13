@@ -168,7 +168,7 @@ def test_job_evaluation_requires_default_resume(client: TestClient) -> None:
     response = client.post(f"/api/v1/jobs/{job_id}/evaluations", headers=headers, json={})
 
     assert response.status_code == 422
-    assert "默认简历" in response.json()["detail"]
+    assert "默认简历" in response.json()["error"]["message"]
 
 
 def test_user_cannot_evaluate_other_users_job(client: TestClient) -> None:
