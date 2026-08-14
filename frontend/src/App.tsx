@@ -146,7 +146,6 @@ interface Job {
 type JobPoolItemPatch = Partial<Pick<Job, "application_status">> & {
   applied_at?: string | null;
   application_resume_version_id?: string | null;
-  contact_name?: string | null;
   notes?: string | null;
 };
 
@@ -1090,7 +1089,7 @@ export function App() {
           patch.application_resume_version_id === undefined
             ? job.application_resume_version_id ?? getEffectiveResumeVersion(job.id)?.id ?? null
             : patch.application_resume_version_id,
-        contact_name: patch.contact_name === undefined ? job.contact_name ?? null : patch.contact_name,
+        contact_name: job.contact_name ?? null,
         notes: patch.notes === undefined ? job.notes ?? null : patch.notes
       };
       const response = await api.patch<Job>(`/jobs/${job.id}/pool`, payload);
@@ -1327,7 +1326,7 @@ export function App() {
         <div className="job-pool-meta-header">
           <div>
             <Text strong>投递跟进</Text>
-            <Text type="secondary">保存岗位状态、投递时间、联系人、备注和本次使用的简历版本。</Text>
+            <Text type="secondary">保存岗位状态、投递时间、备注和本次使用的简历版本。</Text>
           </div>
           {job.status_changed_at && (
             <Text type="secondary">更新：{formatDateTime(job.status_changed_at)}</Text>
@@ -1371,20 +1370,6 @@ export function App() {
               onChange={(value) =>
                 updateJobPoolItem(job, { application_resume_version_id: value ?? null })
               }
-            />
-          </label>
-          <label>
-            <Text type="secondary">联系人</Text>
-            <Input
-              disabled={saving}
-              defaultValue={job.contact_name ?? ""}
-              placeholder="HR / 联系人"
-              onBlur={(event) => {
-                const next = event.target.value.trim() || null;
-                if (next !== (job.contact_name ?? null)) {
-                  updateJobPoolItem(job, { contact_name: next });
-                }
-              }}
             />
           </label>
         </div>
