@@ -53,4 +53,4 @@ class ResumeVersion(Base):
 
     resume_file = relationship("ResumeFile", back_populates="versions")
     source_version = relationship("ResumeVersion", remote_side=[id])
-    job = relationship("Job")
+    job = relationship("Job", foreign_keys=[job_id])

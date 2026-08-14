@@ -27,6 +27,11 @@ class JobCollectionSession(Base):
     created_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     duplicated_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     filtered_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    idempotency_key: Mapped[str | None] = mapped_column(String(120))
+    extension_version: Mapped[str | None] = mapped_column(String(30))
+    adapter_name: Mapped[str] = mapped_column(String(50), nullable=False, default="boss-browser")
+    adapter_enabled_snapshot: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    page_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -87,6 +92,14 @@ class Job(Base):
     description: Mapped[str | None] = mapped_column(Text)
     raw_payload: Mapped[str | None] = mapped_column(Text)
     is_in_pool: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    application_status: Mapped[str] = mapped_column(String(30), nullable=False, default="NEW")
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    application_resume_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("resume_versions.id", ondelete="SET NULL")
+    )
+    contact_name: Mapped[str | None] = mapped_column(String(120))
+    notes: Mapped[str | None] = mapped_column(Text)
+    status_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -101,3 +114,7 @@ class Job(Base):
         cascade="all, delete-orphan",
     )
     evaluations = relationship("JobEvaluation", back_populates="job")
+    application_resume_version = relationship(
+        "ResumeVersion",
+        foreign_keys=[application_resume_version_id],
+    )

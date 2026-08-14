@@ -12,12 +12,14 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import get_current_user
+from app.core.config import settings
 from app.db.session import get_db
 from app.models import Job, JobCollectionSession, JobCollectionSessionJob, User
 from app.schemas import (
     CreateJobCollectionSessionRequest,
     DeleteJobCollectionSessionsRequest,
     DeleteJobCollectionSessionsResponse,
+    JobCollectionAdapterStatusResponse,
     JobCollectionSessionListResponse,
     JobCollectionSessionResponse,
     JobCollectionSessionSummaryResponse,
@@ -38,6 +40,15 @@ _KEYWORD_ALIASES = {
     "java": ["java", "spring", "springboot", "spring boot"],
 }
 
+FAILURE_STATUSES = {
+    "failed",
+    "AUTH_REQUIRED",
+    "CAPTCHA_REQUIRED",
+    "RATE_LIMITED",
+    "SOURCE_CHANGED",
+    "NO_RESULT",
+}
+
 
 def _job_response(job: Job) -> JobResponse:
     return JobResponse(
@@ -52,6 +63,15 @@ def _job_response(job: Job) -> JobResponse:
         job_url=job.job_url,
         description=job.description,
         is_in_pool=job.is_in_pool,
+        application_status=job.application_status,
+        applied_at=job.applied_at,
+        application_resume_version_id=job.application_resume_version_id,
+        application_resume_title=(
+            job.application_resume_version.title if job.application_resume_version else None
+        ),
+        contact_name=job.contact_name,
+        notes=job.notes,
+        status_changed_at=job.status_changed_at,
         has_interviewed=False,
         created_at=job.created_at,
     )
@@ -68,6 +88,10 @@ def _session_response(session: JobCollectionSession) -> JobCollectionSessionResp
         collection_token=session.collection_token,
         token_expires_at=session.token_expires_at,
         boss_search_url=build_boss_search_url(session.keyword, session.city, session.work_type),
+        adapter_name=session.adapter_name,
+        adapter_enabled_snapshot=session.adapter_enabled_snapshot,
+        extension_version=session.extension_version,
+        page_limit=session.page_limit,
         error_code=session.error_code,
         error_message=session.error_message,
         accepted_count=session.accepted_count,
@@ -87,6 +111,9 @@ def _session_summary_response(session: JobCollectionSession) -> JobCollectionSes
         limit=session.limit,
         status=session.status,
         boss_search_url=build_boss_search_url(session.keyword, session.city, session.work_type),
+        adapter_name=session.adapter_name,
+        adapter_enabled_snapshot=session.adapter_enabled_snapshot,
+        extension_version=session.extension_version,
         error_code=session.error_code,
         error_message=session.error_message,
         accepted_count=session.accepted_count,
@@ -99,6 +126,25 @@ def _session_summary_response(session: JobCollectionSession) -> JobCollectionSes
     )
 
 
+@router.get("/adapter-status", response_model=JobCollectionAdapterStatusResponse)
+def get_collection_adapter_status(
+    current_user: CurrentUser,
+) -> JobCollectionAdapterStatusResponse:
+    return JobCollectionAdapterStatusResponse(
+        name="boss-browser",
+        enabled=settings.boss_adapter_enabled,
+        min_extension_version=settings.boss_adapter_min_extension_version,
+        max_page_limit=settings.boss_collection_page_limit,
+        rate_limit_window_seconds=settings.boss_collection_rate_limit_window_seconds,
+        rate_limit_max_sessions=settings.boss_collection_rate_limit_max_sessions,
+        detail=(
+            "Boss 浏览器扩展采集适配器可用。"
+            if settings.boss_adapter_enabled
+            else "Boss 浏览器扩展采集适配器已停用，暂不允许创建采集任务。"
+        ),
+    )
+
+
 @router.post("/sessions", response_model=JobCollectionSessionResponse)
 def create_collection_session(
     payload: CreateJobCollectionSessionRequest,
@@ -106,6 +152,41 @@ def create_collection_session(
     db: DbSession,
 ) -> JobCollectionSessionResponse:
     now = datetime.now(UTC)
+    if not settings.boss_adapter_enabled:
+        raise HTTPException(status_code=503, detail="Boss 采集适配器已停用，暂不允许创建采集任务。")
+    if payload.extension_version and _version_lt(
+        payload.extension_version,
+        settings.boss_adapter_min_extension_version,
+    ):
+        raise HTTPException(
+            status_code=426,
+            detail=(
+                "浏览器扩展版本过旧，请升级到 "
+                f"{settings.boss_adapter_min_extension_version} 或更高版本。"
+            ),
+        )
+    if payload.idempotency_key:
+        existing = db.scalar(
+            select(JobCollectionSession).where(
+                JobCollectionSession.user_id == current_user.id,
+                JobCollectionSession.idempotency_key == payload.idempotency_key,
+            )
+        )
+        if existing is not None:
+            return _session_response(existing)
+
+    window_start = now - timedelta(seconds=settings.boss_collection_rate_limit_window_seconds)
+    recent_count = db.scalar(
+        select(func.count())
+        .select_from(JobCollectionSession)
+        .where(
+            JobCollectionSession.user_id == current_user.id,
+            JobCollectionSession.created_at >= window_start,
+        )
+    )
+    if (recent_count or 0) >= settings.boss_collection_rate_limit_max_sessions:
+        raise HTTPException(status_code=429, detail="Boss 采集过于频繁，请稍后再试。")
+
     session = JobCollectionSession(
         user_id=current_user.id,
         keyword=payload.keyword,
@@ -115,6 +196,11 @@ def create_collection_session(
         status="created",
         collection_token=secrets.token_urlsafe(32),
         token_expires_at=now + timedelta(minutes=15),
+        idempotency_key=payload.idempotency_key,
+        extension_version=payload.extension_version,
+        adapter_name="boss-browser",
+        adapter_enabled_snapshot=settings.boss_adapter_enabled,
+        page_limit=settings.boss_collection_page_limit,
         created_at=now,
         updated_at=now,
     )
@@ -247,6 +333,43 @@ def submit_collected_jobs(
         raise HTTPException(status_code=401, detail="采集 Token 无效。")
     if session.token_expires_at.replace(tzinfo=UTC) < datetime.now(UTC):
         raise HTTPException(status_code=401, detail="采集 Token 已过期，请重新创建采集任务。")
+    if (
+        payload.idempotency_key
+        and session.idempotency_key
+        and payload.idempotency_key != session.idempotency_key
+    ):
+        raise HTTPException(status_code=409, detail="采集幂等键与会话不匹配，请重新创建采集任务。")
+    if session.status != "created":
+        return SubmitCollectedJobsResponse(
+            accepted=session.accepted_count,
+            created=session.created_count,
+            duplicated=session.duplicated_count,
+            filtered=session.filtered_count,
+            status=session.status,
+        )
+
+    if payload.status in FAILURE_STATUSES or payload.error_code in {
+        "AUTH_REQUIRED",
+        "CAPTCHA_REQUIRED",
+        "RATE_LIMITED",
+        "SOURCE_CHANGED",
+    }:
+        session.status = payload.error_code or payload.status
+        session.error_code = payload.error_code or payload.status
+        session.error_message = payload.error_message or _collection_error_message(session.status)
+        session.accepted_count = min(len(payload.jobs), session.limit)
+        session.created_count = 0
+        session.duplicated_count = 0
+        session.filtered_count = 0
+        session.extension_version = payload.extension_version or session.extension_version
+        db.commit()
+        return SubmitCollectedJobsResponse(
+            accepted=session.accepted_count,
+            created=0,
+            duplicated=0,
+            filtered=0,
+            status=session.status,
+        )
 
     created = 0
     duplicated = 0
@@ -271,7 +394,7 @@ def submit_collected_jobs(
             item.title,
             item.company,
             item.location,
-            item.job_url,
+            item.description,
             item.source_job_id,
         )
         job = db.scalar(
@@ -349,20 +472,45 @@ def _fingerprint(
     title: str,
     company: str,
     location: str | None,
-    job_url: str | None,
+    description: str | None,
     source_job_id: str | None,
 ) -> str:
+    if source_job_id:
+        raw = "|".join([user_id, "boss", source_job_id.strip().lower()])
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
     raw = "|".join(
         [
             user_id,
-            source_job_id or "",
             title.strip().lower(),
             company.strip().lower(),
             location or "",
-            job_url or "",
+            _jd_summary_for_fingerprint(description),
         ]
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _jd_summary_for_fingerprint(value: str | None) -> str:
+    return (value or "").strip().lower()[:200]
+
+
+def _collection_error_message(status: str) -> str:
+    messages = {
+        "AUTH_REQUIRED": "Boss 当前未登录或登录已失效，请在 Boss 页面手动登录后重新采集。",
+        "CAPTCHA_REQUIRED": "Boss 要求安全验证，请手动完成后再重新采集。",
+        "RATE_LIMITED": "Boss 采集过于频繁，请稍后再试。",
+        "SOURCE_CHANGED": "Boss 页面结构可能已变化，本次采集已停止，未写入不完整岗位。",
+        "NO_RESULT": "当前 Boss 页面没有可采集的有效岗位。",
+    }
+    return messages.get(status, "本次采集失败，已有岗位和评测数据不会受到影响。")
+
+
+def _version_lt(left: str, right: str) -> bool:
+    def parse(value: str) -> tuple[int, ...]:
+        parts = re.findall(r"\d+", value)
+        return tuple(int(part) for part in parts[:3]) or (0,)
+
+    return parse(left) < parse(right)
 
 
 def _is_relevant_to_keyword(item, keyword: str) -> bool:

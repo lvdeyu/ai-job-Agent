@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import axios, { AxiosError } from "axios";
 import {
   Alert,
@@ -6,6 +6,7 @@ import {
   Card,
   Checkbox,
   ConfigProvider,
+  DatePicker,
   Divider,
   Form,
   Input,
@@ -26,6 +27,34 @@ const { Header, Content } = Layout;
 const { Title, Paragraph, Text } = Typography;
 
 const API_BASE = "http://127.0.0.1:18000/api/v1";
+const APPLICATION_STATUS_OPTIONS = [
+  { value: "NEW", label: "待处理" },
+  { value: "SCORED", label: "已评测" },
+  { value: "REVIEWED", label: "已复盘" },
+  { value: "CONFIRMED", label: "准备投递" },
+  { value: "APPLIED", label: "已投递" },
+  { value: "REJECTED", label: "已拒绝" },
+  { value: "ARCHIVED", label: "已归档" }
+];
+
+const APPLICATION_STATUS_COLORS: Record<string, string> = {
+  NEW: "default",
+  SCORED: "blue",
+  REVIEWED: "cyan",
+  CONFIRMED: "geekblue",
+  APPLIED: "green",
+  REJECTED: "red",
+  ARCHIVED: "default"
+};
+
+function applicationStatusText(status?: string) {
+  return APPLICATION_STATUS_OPTIONS.find((option) => option.value === status)?.label ?? "待处理";
+}
+
+function applicationStatusColor(status?: string) {
+  return status ? APPLICATION_STATUS_COLORS[status] ?? "default" : "default";
+}
+
 type SectionKey =
   | "config"
   | "job_search"
@@ -100,6 +129,13 @@ interface Job {
   job_url?: string;
   description?: string;
   is_in_pool: boolean;
+  application_status: string;
+  applied_at?: string;
+  application_resume_version_id?: string;
+  application_resume_title?: string;
+  contact_name?: string;
+  notes?: string;
+  status_changed_at?: string;
   has_interviewed: boolean;
   created_at: string;
 }
@@ -156,6 +192,10 @@ interface JobCollectionSession {
   collection_token: string;
   token_expires_at: string;
   boss_search_url: string;
+  adapter_name: string;
+  adapter_enabled_snapshot: boolean;
+  extension_version?: string;
+  page_limit: number;
   error_code?: string;
   error_message?: string;
   accepted_count?: number;
@@ -173,6 +213,9 @@ interface JobCollectionSessionSummary {
   limit: number;
   status: string;
   boss_search_url: string;
+  adapter_name: string;
+  adapter_enabled_snapshot: boolean;
+  extension_version?: string;
   error_code?: string;
   error_message?: string;
   accepted_count: number;
@@ -189,6 +232,16 @@ interface JobCollectionHistoryPage {
   total: number;
   page: number;
   page_size: number;
+}
+
+interface JobCollectionAdapterStatus {
+  name: string;
+  enabled: boolean;
+  min_extension_version: string;
+  max_page_limit: number;
+  rate_limit_window_seconds: number;
+  rate_limit_max_sessions: number;
+  detail: string;
 }
 
 interface InterviewTurn {
@@ -265,6 +318,7 @@ interface TaskStatusItem {
 
 interface ExtensionResponse {
   ok: boolean;
+  version?: string;
   created?: number;
   duplicated?: number;
   filtered?: number;
@@ -319,8 +373,12 @@ export function App() {
   const [jobPoolLoading, setJobPoolLoading] = useState(false);
   const [addingToPoolJobId, setAddingToPoolJobId] = useState<string | null>(null);
   const [jobPoolFilter, setJobPoolFilter] = useState("");
+  const [jobPoolStatusFilter, setJobPoolStatusFilter] = useState<string | undefined>();
+  const [jobPoolCompanyFilter, setJobPoolCompanyFilter] = useState("");
+  const [jobPoolCityFilter, setJobPoolCityFilter] = useState("");
   const [selectedJobPoolIds, setSelectedJobPoolIds] = useState<string[]>([]);
   const [removingJobPoolBatch, setRemovingJobPoolBatch] = useState(false);
+  const [savingJobPoolItemId, setSavingJobPoolItemId] = useState<string | null>(null);
   const [profileDirty, setProfileDirty] = useState(false);
   const [providerDirty, setProviderDirty] = useState(false);
   const [deletingProviderId, setDeletingProviderId] = useState<string | null>(null);
@@ -376,15 +434,20 @@ export function App() {
     selectedHistoryIdsOnPage.length > 0 && selectedHistoryIdsOnPage.length < historyPageIds.length;
   const filteredJobPool = useMemo(() => {
     const keyword = jobPoolFilter.trim().toLowerCase();
-    if (!keyword) return jobPool;
+    const company = jobPoolCompanyFilter.trim().toLowerCase();
+    const city = jobPoolCityFilter.trim().toLowerCase();
     return jobPool.filter((job) =>
-      [job.title, job.company, job.location, job.salary, job.tags, job.description]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase()
-        .includes(keyword)
+      (!jobPoolStatusFilter || job.application_status === jobPoolStatusFilter) &&
+      (!company || (job.company ?? "").toLowerCase().includes(company)) &&
+      (!city || (job.location ?? "").toLowerCase().includes(city)) &&
+      (!keyword ||
+        [job.title, job.company, job.location, job.salary, job.tags, job.description]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase()
+          .includes(keyword))
     );
-  }, [jobPool, jobPoolFilter]);
+  }, [jobPool, jobPoolCityFilter, jobPoolCompanyFilter, jobPoolFilter, jobPoolStatusFilter]);
   const filteredJobPoolIds = filteredJobPool.map((job) => job.id);
   const selectedJobPoolIdsOnPage = filteredJobPoolIds.filter((id) => selectedJobPoolIds.includes(id));
   const isJobPoolFullySelected =
@@ -444,21 +507,21 @@ export function App() {
     loadJobPool().catch((error) => {
       setMessage({ type: "error", text: errorMessage(error) });
     });
-  }, [token, activeSection]);
+  }, [token, activeSection, jobPoolFilter, jobPoolStatusFilter, jobPoolCompanyFilter, jobPoolCityFilter]);
 
   useEffect(() => {
     if (!token || activeSection !== "interview_history") return;
     loadInterviewHistory().catch((error) => {
       setMessage({ type: "error", text: errorMessage(error) });
     });
-  }, [token, activeSection]);
+  }, [token, activeSection, jobPoolFilter, jobPoolStatusFilter, jobPoolCompanyFilter, jobPoolCityFilter]);
 
   useEffect(() => {
     if (!token || activeSection !== "tasks") return;
     loadTaskStatuses().catch((error) => {
       setMessage({ type: "error", text: errorMessage(error) });
     });
-  }, [token, activeSection]);
+  }, [token, activeSection, jobPoolFilter, jobPoolStatusFilter, jobPoolCompanyFilter, jobPoolCityFilter]);
 
   useEffect(() => {
     function handleExtensionReady(event: MessageEvent) {
@@ -688,7 +751,14 @@ export function App() {
     setJobPoolLoading(true);
     try {
       const [response, resumeResponse] = await Promise.all([
-        api.get<Job[]>("/jobs/pool"),
+        api.get<Job[]>("/jobs/pool", {
+          params: {
+            status: jobPoolStatusFilter,
+            keyword: jobPoolFilter || undefined,
+            company: jobPoolCompanyFilter || undefined,
+            city: jobPoolCityFilter || undefined
+          }
+        }),
         api.get<ResumeFile[]>("/resumes")
       ]);
       setJobPool(response.data);
@@ -981,6 +1051,30 @@ export function App() {
     }
   }
 
+  async function updateJobPoolItem(
+    job: Job,
+    patch: Partial<Pick<Job, "application_status" | "applied_at" | "contact_name" | "notes">>
+  ) {
+    setSavingJobPoolItemId(job.id);
+    try {
+      const payload = {
+        application_status: patch.application_status ?? job.application_status,
+        applied_at: patch.applied_at === undefined ? job.applied_at ?? null : patch.applied_at,
+        application_resume_version_id:
+          job.application_resume_version_id ?? getEffectiveResumeVersion(job.id)?.id ?? null,
+        contact_name: patch.contact_name === undefined ? job.contact_name ?? null : patch.contact_name,
+        notes: patch.notes === undefined ? job.notes ?? null : patch.notes
+      };
+      const response = await api.patch<Job>(`/jobs/${job.id}/pool`, payload);
+      syncJob(response.data);
+      setMessage({ type: "success", text: "岗位池信息已保存。" });
+    } catch (error) {
+      setMessage({ type: "error", text: errorMessage(error) });
+    } finally {
+      setSavingJobPoolItemId(null);
+    }
+  }
+
   async function loadLatestEvaluations(jobList: Job[]) {
     const results = await Promise.all(
       jobList.map(async (job) => {
@@ -1266,6 +1360,9 @@ export function App() {
     setJobs([]);
     setJobPool([]);
     setJobPoolFilter("");
+    setJobPoolStatusFilter(undefined);
+    setJobPoolCompanyFilter("");
+    setJobPoolCityFilter("");
     setSelectedJobPoolIds([]);
     setActiveInterview(null);
     setInterviewHistory([]);
@@ -1865,13 +1962,48 @@ export function App() {
                   </Space>
                   <Text type="secondary">只移出岗位池，不删除岗位、AI 测评和面试历史。</Text>
                 </div>
-                <Input.Search
-                  className="pool-filter"
-                  allowClear
-                  placeholder="筛选岗位池：岗位名 / 公司 / 城市 / 标签"
-                  value={jobPoolFilter}
-                  onChange={(event) => setJobPoolFilter(event.target.value)}
-                />
+                <Space wrap className="pool-filter">
+                  <Select
+                    allowClear
+                    className="pool-status-filter"
+                    placeholder="岗位状态"
+                    value={jobPoolStatusFilter}
+                    options={APPLICATION_STATUS_OPTIONS}
+                    onChange={(value) => setJobPoolStatusFilter(value)}
+                  />
+                  <Input
+                    allowClear
+                    className="pool-small-filter"
+                    placeholder="公司"
+                    value={jobPoolCompanyFilter}
+                    onChange={(event) => setJobPoolCompanyFilter(event.target.value)}
+                  />
+                  <Input
+                    allowClear
+                    className="pool-small-filter"
+                    placeholder="城市"
+                    value={jobPoolCityFilter}
+                    onChange={(event) => setJobPoolCityFilter(event.target.value)}
+                  />
+                  <Input.Search
+                    allowClear
+                    className="pool-keyword-filter"
+                    placeholder="岗位名 / 标签 / JD"
+                    value={jobPoolFilter}
+                    onChange={(event) => setJobPoolFilter(event.target.value)}
+                    onSearch={() => loadJobPool()}
+                  />
+                  <Button
+                    onClick={() => {
+                      setJobPoolStatusFilter(undefined);
+                      setJobPoolCompanyFilter("");
+                      setJobPoolCityFilter("");
+                      setJobPoolFilter("");
+                    }}
+                  >
+                    清空筛选
+                  </Button>
+                </Space>
                 <List
                   loading={jobPoolLoading}
                   dataSource={filteredJobPool}
@@ -1912,7 +2044,9 @@ export function App() {
                               <a href={item.job_url} target="_blank" rel="noreferrer">
                                 {item.title}
                               </a>
-                              <Tag color="green">已确认投递</Tag>
+                              <Tag color={applicationStatusColor(item.application_status)}>
+                                {applicationStatusText(item.application_status)}
+                              </Tag>
                               {item.has_interviewed && <Tag color="purple">已模拟面试</Tag>}
                               {evaluation && (
                                 <Tag color={evaluationTagColor(evaluation.final_score)}>

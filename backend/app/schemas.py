@@ -112,6 +112,18 @@ class CreateJobCollectionSessionRequest(BaseModel):
     city: str | None = Field(default=None, max_length=80)
     work_type: Literal["internship", "full_time"] | None = None
     limit: int = Field(default=20, ge=1, le=50)
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=120)
+    extension_version: str | None = Field(default=None, max_length=30)
+
+
+class JobCollectionAdapterStatusResponse(BaseModel):
+    name: str
+    enabled: bool
+    min_extension_version: str
+    max_page_limit: int
+    rate_limit_window_seconds: int
+    rate_limit_max_sessions: int
+    detail: str
 
 
 class JobResponse(BaseModel):
@@ -126,6 +138,13 @@ class JobResponse(BaseModel):
     job_url: str | None
     description: str | None
     is_in_pool: bool
+    application_status: str = "NEW"
+    applied_at: datetime | None = None
+    application_resume_version_id: str | None = None
+    application_resume_title: str | None = None
+    contact_name: str | None = None
+    notes: str | None = None
+    status_changed_at: datetime | None = None
     has_interviewed: bool = False
     created_at: datetime
 
@@ -140,6 +159,10 @@ class JobCollectionSessionResponse(BaseModel):
     collection_token: str
     token_expires_at: datetime
     boss_search_url: str
+    adapter_name: str = "boss-browser"
+    adapter_enabled_snapshot: bool = True
+    extension_version: str | None = None
+    page_limit: int = 3
     error_code: str | None
     error_message: str | None
     accepted_count: int = 0
@@ -157,6 +180,9 @@ class JobCollectionSessionSummaryResponse(BaseModel):
     limit: int
     status: str
     boss_search_url: str
+    adapter_name: str = "boss-browser"
+    adapter_enabled_snapshot: bool = True
+    extension_version: str | None = None
     error_code: str | None
     error_message: str | None
     accepted_count: int = 0
@@ -191,6 +217,22 @@ class DeleteJobPoolJobsResponse(BaseModel):
     removed_count: int
 
 
+class UpdateJobPoolItemRequest(BaseModel):
+    application_status: Literal[
+        "NEW",
+        "SCORED",
+        "REVIEWED",
+        "CONFIRMED",
+        "APPLIED",
+        "REJECTED",
+        "ARCHIVED",
+    ]
+    applied_at: datetime | None = None
+    application_resume_version_id: str | None = None
+    contact_name: str | None = Field(default=None, max_length=120)
+    notes: str | None = Field(default=None, max_length=5000)
+
+
 class TaskStatusItemResponse(BaseModel):
     name: str
     status: str
@@ -215,9 +257,20 @@ class CollectedJobItem(BaseModel):
 class SubmitCollectedJobsRequest(BaseModel):
     collection_token: str
     jobs: list[CollectedJobItem] = Field(default_factory=list)
-    status: Literal["success", "partial_success", "failed"] = "success"
+    status: Literal[
+        "success",
+        "partial_success",
+        "failed",
+        "AUTH_REQUIRED",
+        "CAPTCHA_REQUIRED",
+        "RATE_LIMITED",
+        "SOURCE_CHANGED",
+        "NO_RESULT",
+    ] = "success"
     error_code: str | None = Field(default=None, max_length=50)
     error_message: str | None = None
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=120)
+    extension_version: str | None = Field(default=None, max_length=30)
 
 
 class SubmitCollectedJobsResponse(BaseModel):

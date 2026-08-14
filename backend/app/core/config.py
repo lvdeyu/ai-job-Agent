@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60 * 24 * 7
     resume_storage_dir: str = "../data/resumes"
     cors_origins: list[str] = ["http://localhost:15173", "http://127.0.0.1:15173"]
+    boss_adapter_enabled: bool = True
+    boss_adapter_min_extension_version: str = "0.1.0"
+    boss_collection_page_limit: int = 3
+    boss_collection_rate_limit_window_seconds: int = 60
+    boss_collection_rate_limit_max_sessions: int = 30
 
     model_config = SettingsConfigDict(
         env_file="../.env",

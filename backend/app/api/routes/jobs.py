@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -26,6 +27,7 @@ from app.schemas import (
     DeleteJobPoolJobsResponse,
     JobEvaluationResponse,
     JobResponse,
+    UpdateJobPoolItemRequest,
 )
 from app.services.job_evaluation import build_job_evaluation_report
 
@@ -49,12 +51,28 @@ def list_jobs(
 def list_job_pool(
     current_user: CurrentUser,
     db: DbSession,
+    status: str | None = None,
+    keyword: str | None = None,
+    company: str | None = None,
+    city: str | None = None,
 ) -> list[JobResponse]:
-    jobs = db.scalars(
-        select(Job)
-        .where(Job.user_id == current_user.id, Job.is_in_pool)
-        .order_by(Job.updated_at.desc(), Job.created_at.desc())
-    )
+    query = select(Job).where(Job.user_id == current_user.id, Job.is_in_pool)
+    if status:
+        query = query.where(Job.application_status == status)
+    if keyword:
+        like = f"%{keyword.strip()}%"
+        query = query.where(
+            (Job.title.ilike(like))
+            | (Job.company.ilike(like))
+            | (Job.location.ilike(like))
+            | (Job.tags.ilike(like))
+            | (Job.description.ilike(like))
+        )
+    if company:
+        query = query.where(Job.company.ilike(f"%{company.strip()}%"))
+    if city:
+        query = query.where(Job.location.ilike(f"%{city.strip()}%"))
+    jobs = db.scalars(query.order_by(Job.updated_at.desc(), Job.created_at.desc()))
     return [_job_response(job, db) for job in jobs]
 
 
@@ -75,7 +93,11 @@ def remove_jobs_from_pool(
         db.execute(
             update(Job)
             .where(Job.user_id == current_user.id, Job.id.in_(owned_job_ids))
-            .values(is_in_pool=False)
+            .values(
+                is_in_pool=False,
+                application_status="ARCHIVED",
+                status_changed_at=datetime.now(UTC),
+            )
         )
         db.commit()
     return DeleteJobPoolJobsResponse(removed_count=len(owned_job_ids))
@@ -88,10 +110,45 @@ def add_job_to_pool(
     db: DbSession,
 ) -> JobResponse:
     job = _get_owned_job(job_id, current_user.id, db)
+    now = datetime.now(UTC)
     if not job.is_in_pool:
         job.is_in_pool = True
+        job.application_status = "CONFIRMED"
+        job.status_changed_at = now
         db.commit()
         db.refresh(job)
+    return _job_response(job, db)
+
+
+@router.patch("/{job_id}/pool", response_model=JobResponse)
+def update_job_pool_item(
+    job_id: str,
+    payload: UpdateJobPoolItemRequest,
+    current_user: CurrentUser,
+    db: DbSession,
+) -> JobResponse:
+    job = _get_owned_job(job_id, current_user.id, db)
+    if not job.is_in_pool:
+        raise HTTPException(status_code=422, detail="请先将岗位加入岗位池。")
+
+    if payload.application_resume_version_id:
+        resume_version = db.scalar(
+            select(ResumeVersion).where(
+                ResumeVersion.id == payload.application_resume_version_id,
+                ResumeVersion.user_id == current_user.id,
+            )
+        )
+        if resume_version is None:
+            raise HTTPException(status_code=404, detail="未找到该简历版本。")
+
+    job.application_status = payload.application_status
+    job.applied_at = payload.applied_at
+    job.application_resume_version_id = payload.application_resume_version_id
+    job.contact_name = payload.contact_name
+    job.notes = payload.notes
+    job.status_changed_at = datetime.now(UTC)
+    db.commit()
+    db.refresh(job)
     return _job_response(job, db)
 
 
@@ -147,6 +204,9 @@ def create_job_evaluation(
         raw_report_json=_dump(report),
     )
     db.add(evaluation)
+    if job.is_in_pool and job.application_status in {"NEW", "CONFIRMED"}:
+        job.application_status = "SCORED"
+        job.status_changed_at = datetime.now(UTC)
     db.commit()
     db.refresh(evaluation)
     return _evaluation_response(evaluation, db)
@@ -185,6 +245,15 @@ def _job_response(job: Job, db: Session) -> JobResponse:
         job_url=job.job_url,
         description=job.description,
         is_in_pool=job.is_in_pool,
+        application_status=job.application_status,
+        applied_at=job.applied_at,
+        application_resume_version_id=job.application_resume_version_id,
+        application_resume_title=(
+            job.application_resume_version.title if job.application_resume_version else None
+        ),
+        contact_name=job.contact_name,
+        notes=job.notes,
+        status_changed_at=job.status_changed_at,
         has_interviewed=has_interviewed,
         created_at=job.created_at,
     )
