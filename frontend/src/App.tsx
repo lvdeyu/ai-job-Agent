@@ -12,6 +12,7 @@ import {
   InputNumber,
   Layout,
   List,
+  Modal,
   Pagination,
   Select,
   Space,
@@ -19,7 +20,7 @@ import {
   Typography,
   Upload
 } from "antd";
-import { Bot, BriefcaseBusiness, FileText, History, LogOut, MessageSquareText, Search, Settings, ShieldCheck, Trash2, UserRound } from "lucide-react";
+import { Bot, BriefcaseBusiness, FileText, History, LogOut, MessageSquareText, Search, Settings, ShieldCheck, Trash2, UploadCloud, UserRound } from "lucide-react";
 
 const { Header, Content } = Layout;
 const { Title, Paragraph, Text } = Typography;
@@ -71,7 +72,7 @@ interface ResumeVersion {
   title: string;
   version_no: number;
   extracted_text: string;
-  source_type: "uploaded" | "job_copy";
+  source_type: "uploaded" | "job_copy" | "job_upload";
   source_version_id?: string;
   job_id?: string;
   created_at: string;
@@ -124,6 +125,7 @@ interface JobEvaluation {
   job_id: string;
   resume_version_id: string;
   resume_title?: string;
+  resume_source_type?: string;
   framework_version: string;
   prompt_version: string;
   output_schema_version: string;
@@ -302,12 +304,10 @@ export function App() {
   const [evaluationsByJobId, setEvaluationsByJobId] = useState<Record<string, JobEvaluation>>({});
   const [evaluationHistoriesByJobId, setEvaluationHistoriesByJobId] = useState<Record<string, JobEvaluation[]>>({});
   const [evaluatingJobId, setEvaluatingJobId] = useState<string | null>(null);
-  const [selectedResumeVersionByJobId, setSelectedResumeVersionByJobId] = useState<Record<string, string>>({});
-  const [resumeVersionDrafts, setResumeVersionDrafts] = useState<
-    Record<string, { title: string; extracted_text: string }>
-  >({});
-  const [copyingResumeForJobId, setCopyingResumeForJobId] = useState<string | null>(null);
-  const [savingResumeVersionId, setSavingResumeVersionId] = useState<string | null>(null);
+  const [jobResumeModalJob, setJobResumeModalJob] = useState<Job | null>(null);
+  const [jobResumeFile, setJobResumeFile] = useState<File | null>(null);
+  const [jobResumeUploadError, setJobResumeUploadError] = useState<string | null>(null);
+  const [uploadingJobResumeId, setUploadingJobResumeId] = useState<string | null>(null);
   const [historyPage, setHistoryPage] = useState(1);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyData, setHistoryData] = useState<JobCollectionHistoryPage | null>(null);
@@ -358,8 +358,16 @@ export function App() {
   );
   const defaultResumeVersion = useMemo(() => {
     const defaultResume = resumes.find((resume) => resume.is_default);
-    return defaultResume?.versions[defaultResume.versions.length - 1] ?? allResumeVersions[0];
+    const defaultUploadedVersions = defaultResume?.versions.filter((version) => version.source_type === "uploaded") ?? [];
+    return (
+      defaultUploadedVersions[defaultUploadedVersions.length - 1] ??
+      allResumeVersions.find((version) => version.source_type === "uploaded")
+    );
   }, [allResumeVersions, resumes]);
+  const baseResumeFiles = useMemo(
+    () => resumes.filter((resume) => resume.versions.some((version) => version.source_type === "uploaded")),
+    [resumes]
+  );
   const historyPageIds = historyData?.items.map((item) => item.id) ?? [];
   const selectedHistoryIdsOnPage = historyPageIds.filter((id) => selectedHistoryIds.includes(id));
   const isHistoryPageFullySelected =
@@ -679,8 +687,12 @@ export function App() {
     if (!token) return;
     setJobPoolLoading(true);
     try {
-      const response = await api.get<Job[]>("/jobs/pool");
+      const [response, resumeResponse] = await Promise.all([
+        api.get<Job[]>("/jobs/pool"),
+        api.get<ResumeFile[]>("/resumes")
+      ]);
       setJobPool(response.data);
+      setResumes(resumeResponse.data);
       setSelectedJobPoolIds((previous) =>
         previous.filter((id) => response.data.some((job) => job.id === id))
       );
@@ -997,25 +1009,18 @@ export function App() {
     });
   }
 
-  async function evaluateJob(jobId: string, resumeVersionId?: string) {
-    const selectedVersionId = resumeVersionId ?? getSelectedResumeVersion(jobId)?.id;
+  async function evaluateJob(jobId: string) {
     setEvaluatingJobId(jobId);
     try {
-      const response = await api.post<JobEvaluation>(
-        `/jobs/${jobId}/evaluations`,
-        selectedVersionId ? { resume_version_id: selectedVersionId } : {}
-      );
+      const response = await api.post<JobEvaluation>(`/jobs/${jobId}/evaluations`, {});
       setEvaluationsByJobId((previous) => ({ ...previous, [jobId]: response.data }));
       setEvaluationHistoriesByJobId((previous) => ({
         ...previous,
         [jobId]: [response.data, ...(previous[jobId] ?? [])]
       }));
-      if (selectedVersionId) {
-        setSelectedResumeVersionByJobId((previous) => ({ ...previous, [jobId]: selectedVersionId }));
-      }
       setMessage({
         type: "success",
-        text: `AI 测评完成：${response.data.final_score.toFixed(1)}/100，建议：${response.data.recommendation}`
+        text: `AI 测评完成：${response.data.final_score.toFixed(1)}/100，使用${resumeSourceText(response.data.resume_source_type)}，建议：${response.data.recommendation}`
       });
     } catch (error) {
       setMessage({ type: "error", text: errorMessage(error) });
@@ -1024,83 +1029,51 @@ export function App() {
     }
   }
 
-  async function copyJobSpecificResumeVersion(job: Job) {
-    const sourceVersion = getSelectedResumeVersion(job.id) ?? defaultResumeVersion;
-    if (!sourceVersion) {
-      setMessage({ type: "error", text: "请先上传或设置默认简历后再复制岗位专属版本。" });
+  async function uploadJobResume() {
+    if (!jobResumeModalJob) return;
+    if (!jobResumeFile) {
+      setJobResumeUploadError("请先选择 .docx、.md 或 .pdf 简历文件。");
       return;
     }
-    setCopyingResumeForJobId(job.id);
+    setUploadingJobResumeId(jobResumeModalJob.id);
+    setJobResumeUploadError(null);
     try {
-      const response = await api.post<ResumeVersion>("/resumes/versions/job-specific", {
-        job_id: job.id,
-        source_resume_version_id: sourceVersion.id
+      const formData = new FormData();
+      formData.append("file", jobResumeFile);
+      await api.post<ResumeVersion>(`/resumes/jobs/${jobResumeModalJob.id}/upload`, formData, {
+        headers: { "Content-Type": "multipart/form-data" }
       });
-      setSelectedResumeVersionByJobId((previous) => ({ ...previous, [job.id]: response.data.id }));
-      setResumeVersionDrafts((previous) => ({
-        ...previous,
-        [response.data.id]: {
-          title: response.data.title,
-          extracted_text: response.data.extracted_text
-        }
-      }));
+      setJobResumeModalJob(null);
+      setJobResumeFile(null);
+      setJobResumeUploadError(null);
       await refreshWorkspace();
-      setMessage({ type: "success", text: "已复制岗位专属简历版本，可以手动编辑后重新评测。" });
-    } catch (error) {
-      setMessage({ type: "error", text: errorMessage(error) });
-    } finally {
-      setCopyingResumeForJobId(null);
-    }
-  }
-
-  async function saveResumeVersion(version: ResumeVersion) {
-    const draft = resumeVersionDrafts[version.id] ?? {
-      title: version.title,
-      extracted_text: version.extracted_text
-    };
-    setSavingResumeVersionId(version.id);
-    try {
-      const response = await api.patch<ResumeVersion>(`/resumes/versions/${version.id}`, draft);
-      setResumeVersionDrafts((previous) => ({
-        ...previous,
-        [version.id]: {
-          title: response.data.title,
-          extracted_text: response.data.extracted_text
-        }
-      }));
-      await refreshWorkspace();
-      setMessage({ type: "success", text: "岗位专属简历版本已保存。" });
-    } catch (error) {
-      setMessage({ type: "error", text: errorMessage(error) });
-    } finally {
-      setSavingResumeVersionId(null);
-    }
-  }
-
-  function updateResumeVersionDraft(version: ResumeVersion, patch: Partial<{ title: string; extracted_text: string }>) {
-    setResumeVersionDrafts((previous) => ({
-      ...previous,
-      [version.id]: {
-        title: previous[version.id]?.title ?? version.title,
-        extracted_text: previous[version.id]?.extracted_text ?? version.extracted_text,
-        ...patch
+      if (activeSection === "job_pool") {
+        await loadJobPool();
       }
-    }));
+      setMessage({ type: "success", text: "岗位简历上传成功，后续 AI 测评会优先使用这份简历。" });
+    } catch (error) {
+      const text = errorMessage(error);
+      setJobResumeUploadError(text);
+      setMessage({ type: "error", text });
+    } finally {
+      setUploadingJobResumeId(null);
+    }
+  }
+
+  function openJobResumeUpload(job: Job) {
+    setJobResumeModalJob(job);
+    setJobResumeFile(null);
+    setJobResumeUploadError(null);
   }
 
   function getJobSpecificResumeVersions(jobId: string) {
     return allResumeVersions
       .filter((version) => version.job_id === jobId)
-      .sort((a, b) => b.version_no - a.version_no);
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
   }
 
-  function getSelectedResumeVersion(jobId: string): ResumeVersion | undefined {
-    const selectedId = selectedResumeVersionByJobId[jobId];
-    return (
-      allResumeVersions.find((version) => version.id === selectedId) ??
-      getJobSpecificResumeVersions(jobId)[0] ??
-      defaultResumeVersion
-    );
+  function getEffectiveResumeVersion(jobId: string): ResumeVersion | undefined {
+    return getJobSpecificResumeVersions(jobId)[0] ?? defaultResumeVersion;
   }
 
   function getEvaluationDelta(jobId: string) {
@@ -1115,12 +1088,10 @@ export function App() {
   }
 
   async function startInterview(jobId: string) {
-    const selectedVersionId = getSelectedResumeVersion(jobId)?.id;
     setInterviewLoadingJobId(jobId);
     try {
       const response = await api.post<InterviewSession>("/interviews", {
         job_id: jobId,
-        resume_version_id: selectedVersionId,
         max_questions: 5
       });
       setActiveInterview(response.data);
@@ -1175,109 +1146,51 @@ export function App() {
 
   function renderJobResumeVersionPanel(job: Job) {
     const jobVersions = getJobSpecificResumeVersions(job.id);
-    const selectedVersion = getSelectedResumeVersion(job.id);
-    const versionOptions = [
-      ...(defaultResumeVersion ? [defaultResumeVersion] : []),
-      ...jobVersions
-    ].filter((version, index, versions) => versions.findIndex((item) => item.id === version.id) === index);
-    if (selectedVersion && !versionOptions.some((version) => version.id === selectedVersion.id)) {
-      versionOptions.unshift(selectedVersion);
-    }
-    const draft = selectedVersion
-      ? resumeVersionDrafts[selectedVersion.id] ?? {
-          title: selectedVersion.title,
-          extracted_text: selectedVersion.extracted_text
-        }
-      : null;
-    const canEdit = selectedVersion?.source_type === "job_copy";
+    const effectiveVersion = getEffectiveResumeVersion(job.id);
+    const latestJobVersion = jobVersions[0];
     const delta = getEvaluationDelta(job.id);
 
     return (
       <div className="resume-version-panel">
         <div className="resume-version-header">
           <div>
-            <Text strong>岗位专属简历版本</Text>
+            <Text strong>测评简历</Text>
             <Text type="secondary">
-              AI 只提供建议；这里的内容需要你手动编辑保存后再复评。
+              {latestJobVersion
+                ? "已上传岗位简历，AI 测评会优先使用这份简历。"
+                : "未上传岗位简历，AI 测评会使用基础配置里的默认简历。"}
             </Text>
           </div>
+          <Tag color={latestJobVersion ? "blue" : "default"}>
+            {latestJobVersion ? "岗位上传优先" : "使用默认简历"}
+          </Tag>
+        </div>
+        <Space wrap className="resume-version-actions">
+          <Button
+            icon={<UploadCloud size={16} />}
+            onClick={() => openJobResumeUpload(job)}
+          >
+            {latestJobVersion ? "更换简历" : "上传简历"}
+          </Button>
+          <Button
+            type="primary"
+            disabled={!effectiveVersion}
+            loading={evaluatingJobId === job.id}
+            onClick={() => evaluateJob(job.id)}
+          >
+            {latestJobVersion ? "用岗位简历复评" : "AI 测评"}
+          </Button>
           {delta && (
             <Tag color={delta.scoreDelta >= 0 ? "green" : "red"}>
               较上次 {delta.scoreDelta >= 0 ? "+" : ""}
               {delta.scoreDelta.toFixed(1)} 分
             </Tag>
           )}
-        </div>
-        <Space wrap className="resume-version-actions">
-          <Select
-            className="resume-version-select"
-            placeholder="选择用于复评的简历版本"
-            value={selectedVersion?.id}
-            options={versionOptions.map((version) => ({
-              value: version.id,
-              label: `${version.source_type === "job_copy" ? "专属" : "默认"} · ${version.title}`
-            }))}
-            onChange={(versionId) => {
-              const nextVersion = allResumeVersions.find((version) => version.id === versionId);
-              setSelectedResumeVersionByJobId((previous) => ({ ...previous, [job.id]: versionId }));
-              if (nextVersion) {
-                setResumeVersionDrafts((previous) => ({
-                  ...previous,
-                  [versionId]: {
-                    title: nextVersion.title,
-                    extracted_text: nextVersion.extracted_text
-                  }
-                }));
-              }
-            }}
-          />
-          <Button
-            loading={copyingResumeForJobId === job.id}
-            disabled={!defaultResumeVersion}
-            onClick={() => copyJobSpecificResumeVersion(job)}
-          >
-            复制岗位专属版本
-          </Button>
-          <Button
-            type="primary"
-            disabled={!selectedVersion}
-            loading={evaluatingJobId === job.id}
-            onClick={() => evaluateJob(job.id, selectedVersion?.id)}
-          >
-            用该版本复评
-          </Button>
         </Space>
-        {selectedVersion && draft && (
-          <Space direction="vertical" size={8} className="resume-version-editor">
-            <Input
-              value={draft.title}
-              disabled={!canEdit}
-              onChange={(event) => updateResumeVersionDraft(selectedVersion, { title: event.target.value })}
-            />
-            <Input.TextArea
-              rows={6}
-              value={draft.extracted_text}
-              disabled={!canEdit}
-              onChange={(event) =>
-                updateResumeVersionDraft(selectedVersion, { extracted_text: event.target.value })
-              }
-            />
-            <Space wrap>
-              <Button
-                disabled={!canEdit}
-                loading={savingResumeVersionId === selectedVersion.id}
-                onClick={() => saveResumeVersion(selectedVersion)}
-              >
-                保存手动修改
-              </Button>
-              <Text type="secondary">
-                {canEdit
-                  ? `当前版本：${selectedVersion.title}`
-                  : "原始上传版本只读；请先复制岗位专属版本再编辑。"}
-              </Text>
-            </Space>
-          </Space>
-        )}
+        <Text type="secondary">
+          当前：{effectiveVersion ? `${resumeSourceText(effectiveVersion.source_type)} · ${effectiveVersion.title}` : "暂无可用简历"}
+          {latestJobVersion ? ` · 上传于 ${formatDateTime(latestJobVersion.created_at)}` : ""}
+        </Text>
       </div>
     );
   }
@@ -1384,6 +1297,65 @@ export function App() {
         </Header>
         <Content className="app-content">
           {message && <Alert className="top-alert" type={message.type} message={message.text} showIcon closable />}
+          <Modal
+            title={jobResumeModalJob ? `上传简历：${jobResumeModalJob.title}` : "上传岗位简历"}
+            open={Boolean(jobResumeModalJob)}
+            onCancel={() => {
+              setJobResumeModalJob(null);
+              setJobResumeFile(null);
+              setJobResumeUploadError(null);
+            }}
+            footer={[
+              <Button
+                key="cancel"
+                onClick={() => {
+                  setJobResumeModalJob(null);
+                  setJobResumeFile(null);
+                  setJobResumeUploadError(null);
+                }}
+              >
+                取消
+              </Button>,
+              <Button
+                key="upload"
+                type="primary"
+                loading={Boolean(jobResumeModalJob && uploadingJobResumeId === jobResumeModalJob.id)}
+                disabled={!jobResumeFile}
+                onClick={uploadJobResume}
+              >
+                上传并解析
+              </Button>
+            ]}
+            destroyOnHidden
+          >
+            <Space direction="vertical" size={12} className="job-resume-upload-modal">
+              <Text type="secondary">
+                上传你在 WPS 或 Word 中改好的简历。该岗位后续 AI 测评会优先使用这份简历，不会覆盖基础配置里的默认简历。
+              </Text>
+              {jobResumeUploadError && (
+                <Alert type="error" showIcon message={jobResumeUploadError} />
+              )}
+              <Upload.Dragger
+                accept=".docx,.md,.pdf"
+                maxCount={1}
+                disabled={Boolean(jobResumeModalJob && uploadingJobResumeId === jobResumeModalJob.id)}
+                beforeUpload={(file) => {
+                  setJobResumeFile(file);
+                  setJobResumeUploadError(null);
+                  return false;
+                }}
+                onRemove={() => setJobResumeFile(null)}
+              >
+                <p className="upload-title">点击或拖拽上传岗位简历</p>
+                <p className="upload-desc">支持 .docx、.md、文本型 .pdf；扫描版 PDF 暂不支持 OCR。</p>
+              </Upload.Dragger>
+              {jobResumeFile && (
+                <Text type="secondary">
+                  已选择：{jobResumeFile.name}（{(jobResumeFile.size / 1024).toFixed(1)} KB）
+                </Text>
+              )}
+            </Space>
+          </Modal>
 
           {!token ? (
             <Card className="auth-card">
@@ -1632,7 +1604,7 @@ export function App() {
                 </Button>
                 <List
                   className="resume-list"
-                  dataSource={resumes}
+                  dataSource={baseResumeFiles}
                   locale={{ emptyText: "暂无简历" }}
                   renderItem={(item) => (
                     <List.Item
@@ -1917,9 +1889,9 @@ export function App() {
                             key="evaluate"
                             type={evaluation ? "default" : "primary"}
                             loading={evaluatingJobId === item.id}
-                            onClick={() => evaluateJob(item.id, getSelectedResumeVersion(item.id)?.id)}
+                            onClick={() => evaluateJob(item.id)}
                           >
-                            {evaluation ? "用选中版本复评" : "AI 测评"}
+                            {evaluation ? "重新 AI 测评" : "AI 测评"}
                           </Button>,
                           <Button
                             key="interview"
@@ -2418,7 +2390,8 @@ function EvaluationSummary({
         </div>
       )}
       <Text type="secondary">
-        框架 {evaluation.framework_version}，输出 {evaluation.output_schema_version}，简历版本：
+        框架 {evaluation.framework_version}，输出 {evaluation.output_schema_version}，测评简历：
+        {resumeSourceText(evaluation.resume_source_type)} · 版本：
         {evaluation.resume_title ?? evaluation.resume_version_id}
       </Text>
     </div>
@@ -2478,6 +2451,13 @@ function evaluationDimensionName(key: string) {
     commute_city: "城市"
   };
   return names[key] ?? key;
+}
+
+function resumeSourceText(sourceType?: string) {
+  if (sourceType === "job_upload") return "岗位上传简历";
+  if (sourceType === "job_copy") return "岗位专属版本";
+  if (sourceType === "uploaded") return "默认简历";
+  return "简历";
 }
 
 function networkModeText(mode: ModelProvider["network_mode"]) {

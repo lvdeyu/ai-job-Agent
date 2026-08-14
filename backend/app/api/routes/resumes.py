@@ -110,6 +110,51 @@ def create_job_specific_resume_version(
     return version
 
 
+@router.post(
+    "/jobs/{job_id}/upload",
+    response_model=ResumeVersionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_job_resume(
+    job_id: str,
+    file: ResumeUpload,
+    current_user: CurrentUser,
+    db: DbSession,
+) -> ResumeVersion:
+    job = db.scalar(select(Job).where(Job.id == job_id, Job.user_id == current_user.id))
+    if job is None:
+        raise HTTPException(status_code=404, detail="未找到该岗位。")
+    if not job.is_in_pool:
+        raise HTTPException(status_code=422, detail="请先确认投递并加入岗位池后再上传岗位简历。")
+
+    upload = await _save_and_extract_resume(file, current_user)
+    resume = ResumeFile(
+        user_id=current_user.id,
+        original_filename=upload["filename"],
+        file_ext=upload["file_ext"],
+        storage_path=str(upload["storage_path"]),
+        content_type=file.content_type,
+        file_size=upload["file_size"],
+        is_default=False,
+    )
+    db.add(resume)
+    db.flush()
+    version = ResumeVersion(
+        user_id=current_user.id,
+        resume_file_id=resume.id,
+        job_id=job.id,
+        source_type="job_upload",
+        version_no=1,
+        title=f"{job.company} {job.title} - {Path(upload['filename']).stem}"[:120],
+        extracted_text=upload["extracted_text"],
+        structured_summary=None,
+    )
+    db.add(version)
+    db.commit()
+    db.refresh(version)
+    return version
+
+
 @router.patch("/versions/{version_id}", response_model=ResumeVersionResponse)
 def update_resume_version(
     version_id: str,
@@ -147,42 +192,18 @@ async def upload_resume(
     current_user: CurrentUser,
     db: DbSession,
 ) -> ResumeFile:
-    filename = file.filename or "resume"
-    file_ext = Path(filename).suffix.lower()
-    if file_ext not in SUPPORTED_RESUME_EXTENSIONS:
-        raise HTTPException(status_code=422, detail="仅支持 .docx、.md、.pdf 简历文件。")
-
-    content = await file.read()
-    if not content:
-        raise HTTPException(status_code=422, detail="上传文件不能为空。")
-    if len(content) > MAX_RESUME_SIZE:
-        raise HTTPException(status_code=413, detail="简历文件不能超过 8MB。")
-
-    user_dir = Path(settings.resume_storage_dir).resolve() / current_user.id
-    user_dir.mkdir(parents=True, exist_ok=True)
-    safe_name = _safe_filename(filename)
-    storage_path = user_dir / f"{Path(safe_name).stem}_{len(content)}{file_ext}"
-    storage_path.write_bytes(content)
-
-    try:
-        extracted_text = compact_text(extract_resume_text(storage_path, file_ext))
-    except Exception as exc:
-        storage_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=422, detail=f"简历解析失败：{exc}") from exc
-    if not extracted_text:
-        storage_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=422, detail="未能从简历中提取到文本。扫描版 PDF 暂不支持。")
+    upload = await _save_and_extract_resume(file, current_user)
 
     has_default = db.scalar(
         select(ResumeFile.id).where(ResumeFile.user_id == current_user.id, ResumeFile.is_default)
     )
     resume = ResumeFile(
         user_id=current_user.id,
-        original_filename=filename,
-        file_ext=file_ext,
-        storage_path=str(storage_path),
+        original_filename=upload["filename"],
+        file_ext=upload["file_ext"],
+        storage_path=str(upload["storage_path"]),
         content_type=file.content_type,
-        file_size=len(content),
+        file_size=upload["file_size"],
         is_default=has_default is None,
     )
     db.add(resume)
@@ -191,8 +212,8 @@ async def upload_resume(
         user_id=current_user.id,
         resume_file_id=resume.id,
         version_no=1,
-        title=f"{Path(filename).stem} v1",
-        extracted_text=extracted_text,
+        title=f"{Path(upload['filename']).stem} v1",
+        extracted_text=upload["extracted_text"],
         structured_summary=None,
     )
     db.add(version)
@@ -255,6 +276,42 @@ def delete_resume(
         replacement_default.is_default = True
     db.commit()
     storage_path.unlink(missing_ok=True)
+
+
+async def _save_and_extract_resume(file: UploadFile, current_user: User) -> dict[str, object]:
+    filename = file.filename or "resume"
+    file_ext = Path(filename).suffix.lower()
+    if file_ext not in SUPPORTED_RESUME_EXTENSIONS:
+        raise HTTPException(status_code=422, detail="仅支持 .docx、.md、.pdf 简历文件。")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=422, detail="上传文件不能为空。")
+    if len(content) > MAX_RESUME_SIZE:
+        raise HTTPException(status_code=413, detail="简历文件不能超过 8MB。")
+
+    user_dir = Path(settings.resume_storage_dir).resolve() / current_user.id
+    user_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = _safe_filename(filename)
+    storage_path = user_dir / f"{Path(safe_name).stem}_{len(content)}{file_ext}"
+    storage_path.write_bytes(content)
+
+    try:
+        extracted_text = compact_text(extract_resume_text(storage_path, file_ext))
+    except Exception as exc:
+        storage_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=422, detail=f"简历解析失败：{exc}") from exc
+    if not extracted_text:
+        storage_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=422, detail="未能从简历中提取到文本。扫描版 PDF 暂不支持。")
+
+    return {
+        "filename": filename,
+        "file_ext": file_ext,
+        "storage_path": storage_path,
+        "file_size": len(content),
+        "extracted_text": extracted_text,
+    }
 
 
 def _get_owned_resume_version(

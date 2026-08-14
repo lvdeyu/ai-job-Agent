@@ -118,7 +118,7 @@ def create_job_evaluation(
     db: DbSession,
 ) -> JobEvaluationResponse:
     job = _get_owned_job(job_id, current_user.id, db)
-    resume_version = _get_resume_version(payload.resume_version_id, current_user.id, db)
+    resume_version = _get_resume_version(payload.resume_version_id, current_user.id, db, job.id)
     model_provider = _get_model_provider(payload.model_provider_id, current_user.id, db)
     profile = db.scalar(select(UserProfile).where(UserProfile.user_id == current_user.id))
 
@@ -194,6 +194,7 @@ def _get_resume_version(
     resume_version_id: str | None,
     user_id: str,
     db: Session,
+    job_id: str | None = None,
 ) -> ResumeVersion:
     if resume_version_id:
         resume_version = db.scalar(
@@ -205,6 +206,19 @@ def _get_resume_version(
         if resume_version is None:
             raise HTTPException(status_code=404, detail="未找到该简历版本。")
         return resume_version
+
+    if job_id:
+        job_resume_version = db.scalar(
+            select(ResumeVersion)
+            .where(
+                ResumeVersion.user_id == user_id,
+                ResumeVersion.job_id == job_id,
+                ResumeVersion.source_type.in_(["job_upload", "job_copy"]),
+            )
+            .order_by(ResumeVersion.created_at.desc(), ResumeVersion.version_no.desc())
+        )
+        if job_resume_version is not None:
+            return job_resume_version
 
     default_resume = db.scalar(
         select(ResumeFile).where(ResumeFile.user_id == user_id, ResumeFile.is_default)
@@ -256,6 +270,7 @@ def _evaluation_response(evaluation: JobEvaluation, db: Session) -> JobEvaluatio
         job_id=evaluation.job_id,
         resume_version_id=evaluation.resume_version_id,
         resume_title=resume_version.title if resume_version else None,
+        resume_source_type=resume_version.source_type if resume_version else None,
         model_provider_id=evaluation.model_provider_id,
         framework_version=evaluation.framework_version,
         prompt_version=evaluation.prompt_version,

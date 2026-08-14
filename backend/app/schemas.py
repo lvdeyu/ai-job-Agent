@@ -245,6 +245,7 @@ class JobEvaluationResponse(BaseModel):
     job_id: str
     resume_version_id: str
     resume_title: str | None = None
+    resume_source_type: str | None = None
     model_provider_id: str | None = None
     framework_version: str
     prompt_version: str

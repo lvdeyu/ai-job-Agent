@@ -7,6 +7,86 @@ from tests.test_v01_account_config_resume import client as client
 from tests.test_v01_job_evaluation import _create_job_for_user, _setup_profile_and_resume
 
 
+def test_job_pool_uploaded_resume_takes_priority_for_evaluation(client: TestClient) -> None:
+    token = _register_and_login(client, "v02-job-upload-priority@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    _setup_profile_and_resume(
+        client,
+        token,
+        resume_text="Python 后端项目，负责接口开发。",
+    )
+    job_id = _create_job_for_user(
+        client,
+        token,
+        description="岗位要求：熟悉 Python、FastAPI、RAG 和 AI Agent，负责求职 Agent 工具开发。",
+    )
+    pool_response = client.post(f"/api/v1/jobs/{job_id}/pool", headers=headers)
+    assert pool_response.status_code == 200, pool_response.text
+
+    baseline = client.post(f"/api/v1/jobs/{job_id}/evaluations", headers=headers, json={})
+    assert baseline.status_code == 200, baseline.text
+    baseline_body = baseline.json()
+    assert baseline_body["resume_source_type"] == "uploaded"
+
+    upload_response = client.post(
+        f"/api/v1/resumes/jobs/{job_id}/upload",
+        headers=headers,
+        files={
+            "file": (
+                "agent-job-resume.md",
+                (
+                    "Python FastAPI RAG AI Agent 项目，使用 SQL、Redis、Docker 完成后端开发，"
+                    "负责工具调用、检索增强和求职评测链路。"
+                ).encode(),
+                "text/markdown",
+            )
+        },
+    )
+    assert upload_response.status_code == 201, upload_response.text
+    uploaded = upload_response.json()
+    assert uploaded["source_type"] == "job_upload"
+    assert uploaded["job_id"] == job_id
+
+    current = client.post(f"/api/v1/jobs/{job_id}/evaluations", headers=headers, json={})
+    assert current.status_code == 200, current.text
+    current_body = current.json()
+    assert current_body["resume_version_id"] == uploaded["id"]
+    assert current_body["resume_source_type"] == "job_upload"
+    assert current_body["final_score"] > baseline_body["final_score"]
+    assert any("简历版本" in item for item in current_body["evidence"])
+
+    resumes = client.get("/api/v1/resumes", headers=headers).json()
+    default_resumes = [resume for resume in resumes if resume["is_default"]]
+    assert len(default_resumes) == 1
+    assert default_resumes[0]["versions"][0]["source_type"] == "uploaded"
+
+
+def test_job_resume_upload_requires_owned_pool_job(client: TestClient) -> None:
+    token_a = _register_and_login(client, "v02-upload-owner@example.com")
+    token_b = _register_and_login(client, "v02-upload-other@example.com")
+    headers_a = {"Authorization": f"Bearer {token_a}"}
+    headers_b = {"Authorization": f"Bearer {token_b}"}
+    _setup_profile_and_resume(client, token_a)
+    _setup_profile_and_resume(client, token_b)
+    job_id = _create_job_for_user(client, token_a)
+
+    not_in_pool = client.post(
+        f"/api/v1/resumes/jobs/{job_id}/upload",
+        headers=headers_a,
+        files={"file": ("resume.md", b"Python FastAPI Agent", "text/markdown")},
+    )
+    assert not_in_pool.status_code == 422
+    assert "岗位池" in not_in_pool.json()["error"]["message"]
+
+    client.post(f"/api/v1/jobs/{job_id}/pool", headers=headers_a)
+    cross_user = client.post(
+        f"/api/v1/resumes/jobs/{job_id}/upload",
+        headers=headers_b,
+        files={"file": ("resume.md", b"Python FastAPI Agent", "text/markdown")},
+    )
+    assert cross_user.status_code == 404
+
+
 def test_job_specific_resume_version_can_be_edited_and_reevaluated(
     client: TestClient,
 ) -> None:

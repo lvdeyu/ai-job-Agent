@@ -36,7 +36,7 @@ def create_interview_session(
     db: Session,
 ) -> InterviewSession:
     job = _get_owned_pool_job(job_id, user_id, db)
-    resume_version = _get_resume_version(resume_version_id, user_id, db)
+    resume_version = _get_resume_version(resume_version_id, user_id, db, job.id)
     latest_evaluation = _latest_job_evaluation(job.id, user_id, db)
     seed_question_bank_if_needed(db)
 
@@ -422,6 +422,7 @@ def _get_resume_version(
     resume_version_id: str | None,
     user_id: str,
     db: Session,
+    job_id: str | None = None,
 ) -> ResumeVersion:
     if resume_version_id:
         resume_version = db.scalar(
@@ -433,6 +434,19 @@ def _get_resume_version(
         if resume_version is None:
             raise HTTPException(status_code=404, detail="未找到该简历版本。")
         return resume_version
+
+    if job_id:
+        job_resume_version = db.scalar(
+            select(ResumeVersion)
+            .where(
+                ResumeVersion.user_id == user_id,
+                ResumeVersion.job_id == job_id,
+                ResumeVersion.source_type.in_(["job_upload", "job_copy"]),
+            )
+            .order_by(ResumeVersion.created_at.desc(), ResumeVersion.version_no.desc())
+        )
+        if job_resume_version is not None:
+            return job_resume_version
 
     default_resume = db.scalar(
         select(ResumeFile).where(ResumeFile.user_id == user_id, ResumeFile.is_default)
