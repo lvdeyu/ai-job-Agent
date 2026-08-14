@@ -224,6 +224,8 @@ class UpdateJobPoolItemRequest(BaseModel):
         "REVIEWED",
         "CONFIRMED",
         "APPLIED",
+        "INTERVIEWING",
+        "OFFER",
         "REJECTED",
         "ARCHIVED",
     ]

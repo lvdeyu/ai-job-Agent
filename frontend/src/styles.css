@@ -298,6 +298,56 @@ body {
   margin-bottom: 14px;
 }
 
+.pool-status-filter {
+  width: 140px;
+}
+
+.pool-small-filter {
+  width: 160px;
+}
+
+.pool-keyword-filter {
+  width: min(280px, 100%);
+}
+
+.job-pool-meta {
+  width: min(820px, 100%);
+  margin-top: 8px;
+  padding: 12px 14px;
+  border: 1px solid #e0e7ff;
+  border-radius: 10px;
+  background: #fbfdff;
+}
+
+.job-pool-meta-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.job-pool-meta-header > div {
+  display: grid;
+  gap: 2px;
+}
+
+.job-pool-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.job-pool-meta-grid label,
+.job-pool-notes {
+  display: grid;
+  gap: 4px;
+}
+
+.job-pool-notes {
+  margin-top: 10px;
+}
+
 .interview-stack {
   width: 100%;
 }
@@ -427,6 +477,10 @@ body {
   }
 
   .form-row {
+    grid-template-columns: 1fr;
+  }
+
+  .job-pool-meta-grid {
     grid-template-columns: 1fr;
   }
 }

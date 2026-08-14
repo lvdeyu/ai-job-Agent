@@ -6,7 +6,6 @@ import {
   Card,
   Checkbox,
   ConfigProvider,
-  DatePicker,
   Divider,
   Form,
   Input,
@@ -33,6 +32,8 @@ const APPLICATION_STATUS_OPTIONS = [
   { value: "REVIEWED", label: "已复盘" },
   { value: "CONFIRMED", label: "准备投递" },
   { value: "APPLIED", label: "已投递" },
+  { value: "INTERVIEWING", label: "面试中" },
+  { value: "OFFER", label: "Offer" },
   { value: "REJECTED", label: "已拒绝" },
   { value: "ARCHIVED", label: "已归档" }
 ];
@@ -43,6 +44,8 @@ const APPLICATION_STATUS_COLORS: Record<string, string> = {
   REVIEWED: "cyan",
   CONFIRMED: "geekblue",
   APPLIED: "green",
+  INTERVIEWING: "purple",
+  OFFER: "gold",
   REJECTED: "red",
   ARCHIVED: "default"
 };
@@ -139,6 +142,13 @@ interface Job {
   has_interviewed: boolean;
   created_at: string;
 }
+
+type JobPoolItemPatch = Partial<Pick<Job, "application_status">> & {
+  applied_at?: string | null;
+  application_resume_version_id?: string | null;
+  contact_name?: string | null;
+  notes?: string | null;
+};
 
 interface JobEvaluationDimension {
   score: number;
@@ -514,14 +524,14 @@ export function App() {
     loadInterviewHistory().catch((error) => {
       setMessage({ type: "error", text: errorMessage(error) });
     });
-  }, [token, activeSection, jobPoolFilter, jobPoolStatusFilter, jobPoolCompanyFilter, jobPoolCityFilter]);
+  }, [token, activeSection]);
 
   useEffect(() => {
     if (!token || activeSection !== "tasks") return;
     loadTaskStatuses().catch((error) => {
       setMessage({ type: "error", text: errorMessage(error) });
     });
-  }, [token, activeSection, jobPoolFilter, jobPoolStatusFilter, jobPoolCompanyFilter, jobPoolCityFilter]);
+  }, [token, activeSection]);
 
   useEffect(() => {
     function handleExtensionReady(event: MessageEvent) {
@@ -673,6 +683,12 @@ export function App() {
     setEvaluationHistoriesByJobId({});
     setMessage(null);
     try {
+      const adapterStatus = await api.get<JobCollectionAdapterStatus>("/job-collections/adapter-status");
+      if (!adapterStatus.data.enabled) {
+        setMessage({ type: "error", text: adapterStatus.data.detail });
+        return;
+      }
+
       const extension = await pingExtension();
       if (!extension.ok) {
         setMessage({
@@ -682,7 +698,13 @@ export function App() {
         return;
       }
 
-      const sessionResponse = await api.post<JobCollectionSession>("/job-collections/sessions", values);
+      const idempotencyKey = crypto.randomUUID();
+      const extensionVersion = extension.version ?? "0.1.0";
+      const sessionResponse = await api.post<JobCollectionSession>("/job-collections/sessions", {
+        ...values,
+        idempotency_key: idempotencyKey,
+        extension_version: extensionVersion
+      });
       setCollectionSession(sessionResponse.data);
       const extensionResponse = await sendExtensionMessage<ExtensionResponse>(
         {
@@ -691,7 +713,10 @@ export function App() {
           collectionToken: sessionResponse.data.collection_token,
           bossSearchUrl: sessionResponse.data.boss_search_url,
           backendBaseUrl: API_BASE,
-          limit: sessionResponse.data.limit
+          limit: sessionResponse.data.limit,
+          pageLimit: sessionResponse.data.page_limit,
+          idempotencyKey,
+          extensionVersion
         },
         120000
       );
@@ -704,10 +729,14 @@ export function App() {
       await refreshWorkspace();
       await loadCollectionHistory(1);
 
-      if (refreshedSession.data.status === "failed") {
+      if (["failed", "AUTH_REQUIRED", "CAPTCHA_REQUIRED", "RATE_LIMITED", "SOURCE_CHANGED"].includes(
+        refreshedSession.data.status
+      )) {
         setMessage({
           type: "error",
-          text: refreshedSession.data.error_message ?? "采集失败，请换一个更具体的关键词后重试。"
+          text:
+            refreshedSession.data.error_message ??
+            bossCollectionMessage(refreshedSession.data.error_code ?? refreshedSession.data.status)
         });
         return;
       }
@@ -1051,17 +1080,16 @@ export function App() {
     }
   }
 
-  async function updateJobPoolItem(
-    job: Job,
-    patch: Partial<Pick<Job, "application_status" | "applied_at" | "contact_name" | "notes">>
-  ) {
+  async function updateJobPoolItem(job: Job, patch: JobPoolItemPatch) {
     setSavingJobPoolItemId(job.id);
     try {
       const payload = {
         application_status: patch.application_status ?? job.application_status,
         applied_at: patch.applied_at === undefined ? job.applied_at ?? null : patch.applied_at,
         application_resume_version_id:
-          job.application_resume_version_id ?? getEffectiveResumeVersion(job.id)?.id ?? null,
+          patch.application_resume_version_id === undefined
+            ? job.application_resume_version_id ?? getEffectiveResumeVersion(job.id)?.id ?? null
+            : patch.application_resume_version_id,
         contact_name: patch.contact_name === undefined ? job.contact_name ?? null : patch.contact_name,
         notes: patch.notes === undefined ? job.notes ?? null : patch.notes
       };
@@ -1285,6 +1313,96 @@ export function App() {
           当前：{effectiveVersion ? `${resumeSourceText(effectiveVersion.source_type)} · ${effectiveVersion.title}` : "暂无可用简历"}
           {latestJobVersion ? ` · 上传于 ${formatDateTime(latestJobVersion.created_at)}` : ""}
         </Text>
+      </div>
+    );
+  }
+
+  function renderJobPoolInfoPanel(job: Job) {
+    const saving = savingJobPoolItemId === job.id;
+    const selectedResumeVersionId =
+      job.application_resume_version_id ?? getEffectiveResumeVersion(job.id)?.id;
+
+    return (
+      <div className="job-pool-meta" key={`${job.id}-${job.status_changed_at ?? "new"}`}>
+        <div className="job-pool-meta-header">
+          <div>
+            <Text strong>投递跟进</Text>
+            <Text type="secondary">保存岗位状态、投递时间、联系人、备注和本次使用的简历版本。</Text>
+          </div>
+          {job.status_changed_at && (
+            <Text type="secondary">更新：{formatDateTime(job.status_changed_at)}</Text>
+          )}
+        </div>
+        <div className="job-pool-meta-grid">
+          <label>
+            <Text type="secondary">状态</Text>
+            <Select
+              disabled={saving}
+              value={job.application_status}
+              options={APPLICATION_STATUS_OPTIONS}
+              onChange={(value) => updateJobPoolItem(job, { application_status: value })}
+            />
+          </label>
+          <label>
+            <Text type="secondary">投递时间</Text>
+            <Input
+              type="date"
+              disabled={saving}
+              defaultValue={dateInputValue(job.applied_at)}
+              onBlur={(event) => {
+                const next = event.target.value || null;
+                if (next !== dateInputValue(job.applied_at)) {
+                  updateJobPoolItem(job, { applied_at: next });
+                }
+              }}
+            />
+          </label>
+          <label>
+            <Text type="secondary">使用简历</Text>
+            <Select
+              allowClear
+              disabled={saving || allResumeVersions.length === 0}
+              placeholder="选择测评/投递简历"
+              value={selectedResumeVersionId}
+              options={allResumeVersions.map((version) => ({
+                value: version.id,
+                label: `${resumeSourceText(version.source_type)} · ${version.title}`
+              }))}
+              onChange={(value) =>
+                updateJobPoolItem(job, { application_resume_version_id: value ?? null })
+              }
+            />
+          </label>
+          <label>
+            <Text type="secondary">联系人</Text>
+            <Input
+              disabled={saving}
+              defaultValue={job.contact_name ?? ""}
+              placeholder="HR / 联系人"
+              onBlur={(event) => {
+                const next = event.target.value.trim() || null;
+                if (next !== (job.contact_name ?? null)) {
+                  updateJobPoolItem(job, { contact_name: next });
+                }
+              }}
+            />
+          </label>
+        </div>
+        <label className="job-pool-notes">
+          <Text type="secondary">备注</Text>
+          <Input.TextArea
+            disabled={saving}
+            defaultValue={job.notes ?? ""}
+            placeholder="记录投递渠道、沟通重点、复盘结论等"
+            autoSize={{ minRows: 2, maxRows: 4 }}
+            onBlur={(event) => {
+              const next = event.target.value.trim() || null;
+              if (next !== (job.notes ?? null)) {
+                updateJobPoolItem(job, { notes: next });
+              }
+            }}
+          />
+        </label>
       </div>
     );
   }
@@ -1822,7 +1940,7 @@ export function App() {
                 {collectionSession && (
                   <Alert
                     className="collection-status"
-                    type={collectionSession.status === "success" ? "success" : "info"}
+                    type={collectionStatusAlertType(collectionSession.status)}
                     showIcon
                     message={`本次采集结果：${collectionStatusText(collectionSession.status)}`}
                     description={
@@ -1894,7 +2012,7 @@ export function App() {
                                 <Text strong>{item.keyword}</Text>
                                 {item.city && <Tag>{item.city}</Tag>}
                                 {item.work_type && <Tag>{workTypeText(item.work_type)}</Tag>}
-                                <Tag color={item.status === "success" ? "green" : "orange"}>
+                                <Tag color={collectionStatusColor(item.status)}>
                                   {collectionStatusText(item.status)}
                                 </Tag>
                               </Space>
@@ -2063,6 +2181,7 @@ export function App() {
                                 {item.salary ? ` / ${item.salary}` : ""}
                               </Text>
                               {item.tags && <Text type="secondary">标签：{item.tags}</Text>}
+                              {renderJobPoolInfoPanel(item)}
                               {renderJobResumeVersionPanel(item)}
                               {evaluation && (
                                 <EvaluationSummary evaluation={evaluation} delta={getEvaluationDelta(item.id)} />
@@ -2631,6 +2750,10 @@ function formatDateTime(value: string) {
   return new Date(value).toLocaleString("zh-CN", { hour12: false });
 }
 
+function dateInputValue(value?: string | null) {
+  return value ? value.slice(0, 10) : "";
+}
+
 function collectionStatsText(
   item: Pick<
     JobCollectionSessionSummary,
@@ -2678,6 +2801,7 @@ function bossCollectionMessage(errorCode: string, fallback?: string) {
     EXTENSION_BRIDGE_ERROR: "扩展通信失败。请先刷新工作台页面；如果刚更新过扩展，请在扩展管理页重新加载后再刷新本页面。",
     AUTH_REQUIRED: "Boss 当前未登录或登录已失效。请在 Boss 页面手动登录后重新采集。",
     CAPTCHA_REQUIRED: "Boss 要求验证码或安全验证。系统不会绕过验证，请你手动完成后重新采集。",
+    RATE_LIMITED: "Boss 采集过于频繁，请稍后再试。",
     SOURCE_CHANGED: "没有识别到岗位卡片，可能是 Boss 页面结构变化或页面尚未加载完成。",
     BACKEND_REJECTED: "后端拒绝了采集结果，请检查采集会话是否过期。",
     NO_RESULT: "当前搜索没有采集到有效岗位，可以换关键词或城市再试。"
@@ -2690,9 +2814,29 @@ function collectionStatusText(status: string) {
     created: "已创建",
     success: "成功",
     partial_success: "部分成功",
-    failed: "失败"
+    failed: "失败",
+    AUTH_REQUIRED: "需要登录",
+    CAPTCHA_REQUIRED: "需要安全验证",
+    RATE_LIMITED: "已限速",
+    SOURCE_CHANGED: "页面结构变化",
+    NO_RESULT: "无结果"
   };
   return statusMap[status] ?? status;
+}
+
+function collectionStatusColor(status: string) {
+  if (status === "success") return "green";
+  if (status === "partial_success") return "blue";
+  if (status === "created") return "default";
+  if (["AUTH_REQUIRED", "CAPTCHA_REQUIRED", "RATE_LIMITED"].includes(status)) return "orange";
+  return "red";
+}
+
+function collectionStatusAlertType(status: string): "success" | "info" | "warning" | "error" {
+  if (status === "success") return "success";
+  if (status === "partial_success") return "warning";
+  if (status === "created") return "info";
+  return "error";
 }
 
 

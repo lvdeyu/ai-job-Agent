@@ -6,6 +6,9 @@ type StartBossCollectionMessage = {
   bossSearchUrl: string;
   backendBaseUrl: string;
   limit: number;
+  pageLimit?: number;
+  idempotencyKey?: string;
+  extensionVersion?: string;
 };
 
 type CollectedJob = {
@@ -103,7 +106,9 @@ async function startBossCollection(message: StartBossCollectionMessage) {
         jobs,
         status,
         error_code: contentResponse.error_code,
-        error_message: contentResponse.error_message
+        error_message: contentResponse.error_message,
+        idempotency_key: message.idempotencyKey,
+        extension_version: message.extensionVersion ?? "0.1.0"
       })
     }
   );

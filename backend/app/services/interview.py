@@ -62,6 +62,7 @@ def create_interview_session(
         main_questions_answered=0,
     )
     db.add(session)
+    _move_job_application_status(job, "INTERVIEWING")
     db.flush()
     db.add(_turn_from_question(session, question, turn_index=1))
     db.commit()
@@ -117,6 +118,7 @@ def submit_interview_answer(
         session.status = "completed"
         session.completed_at = datetime.now(UTC)
         session.report_json = _dump(build_interview_report(session))
+        _move_job_application_status(session.job, "REVIEWED", only_from={"INTERVIEWING"})
     else:
         db.add(next_turn)
 
@@ -131,6 +133,7 @@ def finish_interview_session(session_id: str, user_id: str, db: Session) -> Inte
     session.status = "completed"
     session.completed_at = datetime.now(UTC)
     session.report_json = _dump(build_interview_report(session))
+    _move_job_application_status(session.job, "REVIEWED", only_from={"INTERVIEWING"})
     db.commit()
     return get_owned_interview_session(session.id, user_id, db)
 
@@ -416,6 +419,21 @@ def _get_owned_pool_job(job_id: str, user_id: str, db: Session) -> Job:
     if not job.is_in_pool:
         raise HTTPException(status_code=422, detail="请先将岗位确认投递并加入岗位池。")
     return job
+
+
+def _move_job_application_status(
+    job: Job,
+    status: str,
+    *,
+    only_from: set[str] | None = None,
+) -> None:
+    terminal_statuses = {"REJECTED", "ARCHIVED", "OFFER"}
+    if only_from is not None and job.application_status not in only_from:
+        return
+    if only_from is None and job.application_status in terminal_statuses:
+        return
+    job.application_status = status
+    job.status_changed_at = datetime.now(UTC)
 
 
 def _get_resume_version(
