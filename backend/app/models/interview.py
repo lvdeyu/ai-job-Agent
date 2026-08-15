@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -29,6 +30,7 @@ class QuestionBankItem(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     embedding: Mapped[str | None] = mapped_column(Text)
+    embedding_vector: Mapped[list[float] | None] = mapped_column(Vector(1024))
     embedding_model: Mapped[str | None] = mapped_column(String(120))
     source_file: Mapped[str] = mapped_column(String(500), nullable=False)
     source_line: Mapped[int] = mapped_column(Integer, nullable=False)

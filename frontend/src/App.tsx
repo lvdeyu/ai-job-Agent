@@ -284,15 +284,7 @@ interface InterviewSession {
   main_questions_answered: number;
   current_turn?: InterviewTurn;
   turns: InterviewTurn[];
-  report?: {
-    total_score?: number;
-    question_count?: number;
-    summary?: string;
-    strengths?: string[];
-    gaps?: string[];
-    review_suggestions?: string[];
-    covered_skills?: string[];
-  };
+  report?: InterviewReport;
   checkpoint: {
     mode: string;
     status: string;
@@ -2299,11 +2291,13 @@ export function App() {
                         <ReportList title="优势" items={activeInterview.report.strengths ?? []} />
                         <ReportList title="缺口" items={activeInterview.report.gaps ?? []} />
                         <ReportList title="复习建议" items={activeInterview.report.review_suggestions ?? []} />
+                        <ReportSections report={activeInterview.report} />
                       </div>
                     )}
                   </Space>
                 )}
               </Card>
+
 
               <Card
                 className="wide-card interview-history-section"
@@ -2472,12 +2466,14 @@ export function App() {
                           <ReportList title="优势" items={activeInterview.report.strengths ?? []} />
                           <ReportList title="缺口" items={activeInterview.report.gaps ?? []} />
                           <ReportList title="复习建议" items={activeInterview.report.review_suggestions ?? []} />
+                          <ReportSections report={activeInterview.report} />
                         </div>
                       )}
                     </Space>
                   </>
                 ) : null}
               </Card>
+
 
               <Card
                 className="wide-card tasks-section"
@@ -2647,6 +2643,135 @@ function ReportList({ title, items }: { title: string; items: string[] }) {
         ))}
       </ul>
     </div>
+  );
+}
+
+interface InterviewReport {
+  total_score?: number;
+  question_count?: number;
+  summary?: string;
+  strengths?: string[];
+  gaps?: string[];
+  review_suggestions?: string[];
+  covered_skills?: string[];
+  skill_dimensions?: { skill: string; score: number; question_count: number }[];
+  fact_based_analysis?: string[];
+  inference_notes?: string[];
+  previous_reports?: {
+    session_id: string;
+    completed_at?: string | null;
+    total_score: number;
+    question_count: number;
+  }[];
+  evidence?: {
+    question: string;
+    answer?: string | null;
+    score?: number | null;
+    rubric_evidence?: string[];
+    source_question_id?: string | null;
+  }[];
+}
+
+function ReportSections({ report }: { report: InterviewReport }) {
+  const dimensions = report.skill_dimensions ?? [];
+  const facts = report.fact_based_analysis ?? [];
+  const inferences = report.inference_notes ?? [];
+  const history = report.previous_reports ?? [];
+  const evidence = report.evidence ?? [];
+  const currentScore = Number(report.total_score ?? 0);
+
+  return (
+    <>
+      {dimensions.length > 0 && (
+        <div className="evaluation-block">
+          <Text strong>技能维度：</Text>
+          <Space wrap className="evaluation-dimensions">
+            {dimensions.map((dimension) => (
+              <Tag key={dimension.skill} color={evaluationTagColor(dimension.score)}>
+                {dimension.skill} {dimension.score.toFixed(1)} 分（{dimension.question_count} 题）
+              </Tag>
+            ))}
+          </Space>
+        </div>
+      )}
+      {facts.length > 0 && (
+        <div className="evaluation-block">
+          <Text strong>事实依据：</Text>
+          <ul className="compact-list">
+            {facts.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {inferences.length > 0 && (
+        <div className="evaluation-block">
+          <Text strong>推测性评价：</Text>
+          <ul className="compact-list">
+            {inferences.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {history.length > 0 && (
+        <div className="evaluation-block">
+          <Text strong>历史对比（同岗位最近 {history.length} 次）：</Text>
+          <ul className="compact-list">
+            {history.map((item) => {
+              const delta = currentScore - item.total_score;
+              return (
+                <li key={item.session_id}>
+                  {item.completed_at ? new Date(item.completed_at).toLocaleString() : "完成时间未知"}：
+                  {item.total_score.toFixed(1)} 分 / {item.question_count} 题
+                  <Tag color={delta >= 0 ? "green" : "red"} style={{ marginLeft: 8 }}>
+                    较本次 {delta >= 0 ? "+" : ""}
+                    {delta.toFixed(1)} 分
+                  </Tag>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+      {evidence.length > 0 && (
+        <div className="evaluation-block">
+          <Text strong>题目证据：</Text>
+          <ul className="compact-list">
+            {evidence.map((item, index) => (
+              <li key={`${item.question}-${index}`}>
+                <div>
+                  <Text strong>
+                    {index + 1}. {item.question}
+                  </Text>
+                  {typeof item.score === "number" && (
+                    <Tag color={evaluationTagColor(item.score)} style={{ marginLeft: 8 }}>
+                      {item.score.toFixed(1)} 分
+                    </Tag>
+                  )}
+                </div>
+                {item.answer ? (
+                  <div>
+                    <Text type="secondary">
+                      回答：
+                      {item.answer.length > 200 ? `${item.answer.slice(0, 200)}…` : item.answer}
+                    </Text>
+                  </div>
+                ) : null}
+                {item.rubric_evidence && item.rubric_evidence.length > 0 && (
+                  <div>
+                    <Text type="secondary">评分依据：{item.rubric_evidence.join("；")}</Text>
+                  </div>
+                )}
+                {item.source_question_id && (
+                  <Tag style={{ marginTop: 4 }}>题库：{item.source_question_id}</Tag>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </>
   );
 }
 

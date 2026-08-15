@@ -26,6 +26,7 @@ from app.services.interview import (
     get_owned_interview_session,
     submit_interview_answer,
 )
+from app.services.interview_graph import interview_graph_checkpoint_mode
 
 router = APIRouter(prefix="/interviews", tags=["interviews"])
 DbSession = Annotated[Session, Depends(get_db)]
@@ -43,7 +44,7 @@ def list_interviews(
         query = query.where(InterviewSession.job_id == job_id)
     sessions = db.scalars(query.order_by(InterviewSession.created_at.desc())).all()
     return [
-        _session_response(get_owned_interview_session(session.id, current_user.id, db))
+        _session_response(get_owned_interview_session(session.id, current_user.id, db), db)
         for session in sessions
     ]
 
@@ -111,7 +112,7 @@ def create_interview(
         user_id=current_user.id,
         db=db,
     )
-    return _session_response(session)
+    return _session_response(session, db)
 
 
 @router.get("/{session_id}", response_model=InterviewSessionResponse)
@@ -120,7 +121,7 @@ def get_interview(
     current_user: CurrentUser,
     db: DbSession,
 ) -> InterviewSessionResponse:
-    return _session_response(get_owned_interview_session(session_id, current_user.id, db))
+    return _session_response(get_owned_interview_session(session_id, current_user.id, db), db)
 
 
 @router.post("/{session_id}/answers", response_model=InterviewSessionResponse)
@@ -136,7 +137,7 @@ def submit_answer(
         user_id=current_user.id,
         db=db,
     )
-    return _session_response(session)
+    return _session_response(session, db)
 
 
 @router.post("/{session_id}/finish", response_model=InterviewSessionResponse)
@@ -146,10 +147,10 @@ def finish_interview(
     db: DbSession,
 ) -> InterviewSessionResponse:
     session = finish_interview_session(session_id, current_user.id, db)
-    return _session_response(session)
+    return _session_response(session, db)
 
 
-def _session_response(session: InterviewSession) -> InterviewSessionResponse:
+def _session_response(session: InterviewSession, db: Session) -> InterviewSessionResponse:
     open_turn = current_open_turn(session)
     return InterviewSessionResponse(
         id=session.id,
@@ -168,7 +169,7 @@ def _session_response(session: InterviewSession) -> InterviewSessionResponse:
         turns=[_turn_response(turn) for turn in session.turns],
         report=_load(session.report_json, None),
         checkpoint={
-            "mode": "sqlalchemy-session-checkpoint-v1",
+            "mode": interview_graph_checkpoint_mode(db),
             "status": session.status,
             "resume_session_id": session.id,
             "current_turn_id": open_turn.id if open_turn else None,

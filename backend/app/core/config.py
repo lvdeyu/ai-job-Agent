@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     boss_collection_rate_limit_window_seconds: int = 60
     boss_collection_rate_limit_max_sessions: int = 30
 
+    embedding_base_url: str = "https://api.openai.com/v1"
+    embedding_api_key: str = ""
+    embedding_model: str = "text-embedding-3-small"
+    embedding_timeout_seconds: float = 60.0
+
     model_config = SettingsConfigDict(
         env_file="../.env",
         env_file_encoding="utf-8",

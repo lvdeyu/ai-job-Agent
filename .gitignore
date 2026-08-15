@@ -16,3 +16,11 @@ dist/
 
 data/
 tmp/
+
+# 第三方面试资料原始稿（版权内容不入库，仅本地保留）
+knowledge/interview_question_bank/imports/raw/*.md
+# 题库处理中间稿（版权内容不入库，仅本地保留）
+knowledge/interview_question_bank/imports/processed/*.candidates*
+# IDE 本地配置
+.idea/
+

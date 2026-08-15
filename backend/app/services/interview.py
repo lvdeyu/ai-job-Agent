@@ -20,10 +20,12 @@ from app.models import (
     ResumeFile,
     ResumeVersion,
 )
+from app.services.embeddings import EmbeddingError, embed_texts
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 QUESTION_BANK_SEED_DIR = PROJECT_ROOT / "knowledge" / "interview_question_bank" / "seeds"
 RETRIEVAL_MODE = "local-keyword-v1"
+PGVECTOR_RETRIEVAL_MODE = "pgvector-sql-v1"
 SCORING_MODE = "local-rubric-v1"
 
 
@@ -35,20 +37,12 @@ def create_interview_session(
     user_id: str,
     db: Session,
 ) -> InterviewSession:
+    from app.services.interview_graph import run_interview_graph_start
+
     job = _get_owned_pool_job(job_id, user_id, db)
     resume_version = _get_resume_version(resume_version_id, user_id, db, job.id)
     latest_evaluation = _latest_job_evaluation(job.id, user_id, db)
     seed_question_bank_if_needed(db)
-
-    question = select_next_question(
-        db=db,
-        job=job,
-        resume_version=resume_version,
-        evaluation=latest_evaluation,
-        asked_question_bank_item_ids=set(),
-    )
-    if question is None:
-        raise HTTPException(status_code=422, detail="题库为空，请先导入模拟面试题库。")
 
     session = InterviewSession(
         user_id=user_id,
@@ -64,7 +58,31 @@ def create_interview_session(
     db.add(session)
     _move_job_application_status(job, "INTERVIEWING")
     db.flush()
-    db.add(_turn_from_question(session, question, turn_index=1))
+
+    initial_state = {
+        "session_id": session.id,
+        "user_id": user_id,
+        "job_id": job.id,
+        "resume_version_id": resume_version.id,
+        "max_questions": max_questions,
+        "question_count": 0,
+        "main_question_count": 0,
+        "followup_depth": 0,
+        "difficulty": "medium",
+        "question_history": [],
+        "answer_history": [],
+        "covered_skills": [],
+        "uncovered_skills": [],
+        "status": "running",
+        "retrieval_queries": [],
+        "retrieved_question_bank_items": [],
+        "interview_plan": {},
+    }
+    try:
+        run_interview_graph_start(session_id=session.id, db=db, initial_state=initial_state)
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail="题库为空，请先导入模拟面试题库。") from exc
     db.commit()
     return get_owned_interview_session(session.id, user_id, db)
 
@@ -103,24 +121,19 @@ def submit_interview_answer(
     if current_turn is None:
         raise HTTPException(status_code=409, detail="当前没有待回答的问题。")
 
-    result = evaluate_interview_answer(current_turn, answer_text)
-    current_turn.answer_text = answer_text
-    current_turn.score = result["score"]
-    current_turn.feedback = result["feedback"]
-    current_turn.evidence_json = _dump(result["evidence"])
-    current_turn.status = "answered"
-    current_turn.answered_at = datetime.now(UTC)
-    if not current_turn.is_followup:
-        session.main_questions_answered += 1
+    from app.services.interview_graph import (
+        interview_graph_checkpoint_exists,
+        run_interview_graph_resume,
+    )
 
-    next_turn = route_next_interview_turn(session, current_turn, db)
-    if next_turn is None:
-        session.status = "completed"
-        session.completed_at = datetime.now(UTC)
-        session.report_json = _dump(build_interview_report(session))
-        _move_job_application_status(session.job, "REVIEWED", only_from={"INTERVIEWING"})
+    if interview_graph_checkpoint_exists(session_id=session_id, db=db):
+        run_interview_graph_resume(
+            session_id=session_id,
+            db=db,
+            resume_value={"answer": answer_text},
+        )
     else:
-        db.add(next_turn)
+        _legacy_submit_answer(session, current_turn, answer_text, db)
 
     db.commit()
     return get_owned_interview_session(session.id, user_id, db)
@@ -130,10 +143,24 @@ def finish_interview_session(session_id: str, user_id: str, db: Session) -> Inte
     session = get_owned_interview_session(session_id, user_id, db)
     if session.status == "completed":
         return session
-    session.status = "completed"
-    session.completed_at = datetime.now(UTC)
-    session.report_json = _dump(build_interview_report(session))
-    _move_job_application_status(session.job, "REVIEWED", only_from={"INTERVIEWING"})
+
+    from app.services.interview_graph import (
+        interview_graph_checkpoint_exists,
+        run_interview_graph_resume,
+    )
+
+    if interview_graph_checkpoint_exists(session_id=session_id, db=db):
+        run_interview_graph_resume(
+            session_id=session_id,
+            db=db,
+            resume_value={"action": "finish"},
+        )
+    else:
+        session.status = "completed"
+        session.completed_at = datetime.now(UTC)
+        session.report_json = _dump(build_interview_report(session, db=db))
+        _move_job_application_status(session.job, "REVIEWED", only_from={"INTERVIEWING"})
+
     db.commit()
     return get_owned_interview_session(session.id, user_id, db)
 
@@ -226,28 +253,29 @@ def retrieve_interview_questions(
     evaluation: JobEvaluation | None,
     limit: int,
 ) -> list[QuestionBankItem]:
-    items = db.scalars(select(QuestionBankItem)).all()
-    context = _retrieval_context(job, resume_version, evaluation)
-    context_embedding = deterministic_embedding(context)
-    scored = []
-    for item in items:
-        scored.append(
-            (
-                _question_score(item, context),
-                _embedding_similarity(item.embedding, context_embedding),
-                item,
+    if _has_real_embeddings(db):
+        try:
+            return _retrieve_by_pgvector(
+                db=db,
+                job=job,
+                resume_version=resume_version,
+                evaluation=evaluation,
+                limit=limit,
             )
-        )
-    scored.sort(key=lambda pair: (-pair[1], -pair[0], pair[2].external_id))
-    relevant_items = [
-        item
-        for keyword_score, similarity, item in scored[:limit]
-        if keyword_score > 0 or similarity > 0
-    ]
-    return relevant_items or [item for _, _, item in scored[:limit]]
+        except EmbeddingError:
+            pass
+    return _retrieve_local(
+        db=db,
+        job=job,
+        resume_version=resume_version,
+        evaluation=evaluation,
+        limit=limit,
+    )
 
 
 def active_retrieval_mode(db: Session) -> str:
+    if _has_real_embeddings(db):
+        return PGVECTOR_RETRIEVAL_MODE
     has_embedding = (
         db.scalar(
             select(QuestionBankItem.id)
@@ -270,6 +298,7 @@ def evaluate_interview_answer(turn: InterviewTurn, answer_text: str) -> dict[str
     skill_tags = _load(turn.skill_tags_json, [])
 
     criterion_results: list[str] = []
+    fact_based: list[str] = []
     total = 0.0
     for criterion in rubric:
         points = float(criterion.get("points", 0))
@@ -294,6 +323,11 @@ def evaluate_interview_answer(turn: InterviewTurn, answer_text: str) -> dict[str
         criterion_results.append(
             f"{criterion.get('criterion', '评分项')}：{earned:.0f}/{points:.0f}"
         )
+        if matched:
+            fact_based.append(
+                f"{criterion.get('criterion', '评分项')}：命中"
+                f"「{', '.join(sorted(matched)[:4])}」要点"
+            )
 
     score = round(max(0.0, min(total, 100.0)), 1)
     engineering_markers = [
@@ -325,10 +359,15 @@ def evaluate_interview_answer(turn: InterviewTurn, answer_text: str) -> dict[str
         "score": score,
         "feedback": feedback,
         "evidence": criterion_results,
+        "facts": fact_based,
+        "inferences": [feedback],
     }
 
 
-def build_interview_report(session: InterviewSession) -> dict[str, Any]:
+def build_interview_report(
+    session: InterviewSession,
+    db: Session | None = None,
+) -> dict[str, Any]:
     answered_turns = [turn for turn in session.turns if turn.status == "answered"]
     scores = [float(turn.score or 0) for turn in answered_turns]
     total_score = round(sum(scores) / len(scores), 1) if scores else 0.0
@@ -348,7 +387,7 @@ def build_interview_report(session: InterviewSession) -> dict[str, Any]:
         review_suggestions.insert(0, "优先复盘低分问题对应的参考答案和评分要点。")
 
     return {
-        "report_version": "local-report-v1",
+        "report_version": "langgraph-report-v1",
         "total_score": total_score,
         "question_count": len(answered_turns),
         "main_question_count": session.main_questions_answered,
@@ -363,6 +402,10 @@ def build_interview_report(session: InterviewSession) -> dict[str, Any]:
             for turn in weak_turns[:3]
         ],
         "review_suggestions": review_suggestions,
+        "skill_dimensions": _skill_dimensions(answered_turns),
+        "fact_based_analysis": _fact_based_analysis(answered_turns),
+        "inference_notes": _inference_notes(answered_turns),
+        "previous_reports": _previous_reports(session, db),
         "evidence": [
             {
                 "question": turn.question_text,
@@ -555,6 +598,72 @@ def _question_score(item: QuestionBankItem, context: str) -> int:
     return score
 
 
+def _has_real_embeddings(db: Session) -> bool:
+    return (
+        db.scalar(
+            select(QuestionBankItem.id)
+            .where(QuestionBankItem.embedding_vector.is_not(None))
+            .limit(1)
+        )
+        is not None
+    )
+
+
+def _retrieve_by_pgvector(
+    *,
+    db: Session,
+    job: Job,
+    resume_version: ResumeVersion,
+    evaluation: JobEvaluation | None,
+    limit: int,
+) -> list[QuestionBankItem]:
+    context = _retrieval_context(job, resume_version, evaluation)
+    query_embedding = embed_texts([context])[0]
+    if len(query_embedding) != 1024:
+        raise EmbeddingError(
+            f"query embedding 维度 {len(query_embedding)} 与 vector(1024) 不匹配"
+        )
+    return list(
+        db.scalars(
+            select(QuestionBankItem)
+            .where(QuestionBankItem.embedding_vector.is_not(None))
+            .order_by(
+                QuestionBankItem.embedding_vector.cosine_distance(query_embedding)
+            )
+            .limit(limit)
+        )
+    )
+
+
+def _retrieve_local(
+    *,
+    db: Session,
+    job: Job,
+    resume_version: ResumeVersion,
+    evaluation: JobEvaluation | None,
+    limit: int,
+) -> list[QuestionBankItem]:
+    items = db.scalars(select(QuestionBankItem)).all()
+    context = _retrieval_context(job, resume_version, evaluation)
+    context_embedding = deterministic_embedding(context)
+    scored = []
+    for item in items:
+        scored.append(
+            (
+                _question_score(item, context),
+                _embedding_similarity(item.embedding, context_embedding),
+                item,
+            )
+        )
+    scored.sort(key=lambda pair: (-pair[1], -pair[0], pair[2].external_id))
+    relevant_items = [
+        item
+        for keyword_score, similarity, item in scored[:limit]
+        if keyword_score > 0 or similarity > 0
+    ]
+    return relevant_items or [item for _, _, item in scored[:limit]]
+
+
 def deterministic_embedding(text: str, dimensions: int = 32) -> list[float]:
     vector = [0.0 for _ in range(dimensions)]
     for token in _tokens(text):
@@ -632,10 +741,6 @@ def _unique(values) -> list[str]:
     return result
 
 
-def _dump(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False)
-
-
 def _load(value: str | None, fallback):
     if not value:
         return fallback
@@ -643,3 +748,98 @@ def _load(value: str | None, fallback):
         return json.loads(value)
     except json.JSONDecodeError:
         return fallback
+
+
+def _dump(value) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _skill_dimensions(answered_turns: list[InterviewTurn]) -> list[dict[str, Any]]:
+    skill_scores: dict[str, list[float]] = {}
+    for turn in answered_turns:
+        for skill in _load(turn.skill_tags_json, []):
+            skill_scores.setdefault(skill, []).append(float(turn.score or 0))
+    dimensions = [
+        {
+            "skill": skill,
+            "score": round(sum(scores) / len(scores), 1),
+            "question_count": len(scores),
+        }
+        for skill, scores in skill_scores.items()
+    ]
+    dimensions.sort(key=lambda dimension: -dimension["score"])
+    return dimensions
+
+
+def _fact_based_analysis(answered_turns: list[InterviewTurn]) -> list[str]:
+    facts: list[str] = []
+    for turn in answered_turns:
+        turn_facts = _load(turn.evidence_json, [])
+        if turn_facts:
+            facts.append(f"{turn.question_text[:50]} → {'；'.join(turn_facts[:3])}")
+    return facts[:8]
+
+
+def _inference_notes(answered_turns: list[InterviewTurn]) -> list[str]:
+    notes: list[str] = []
+    for turn in answered_turns:
+        if turn.feedback:
+            notes.append(f"{turn.question_text[:50]} → {turn.feedback}")
+    return notes[:8]
+
+
+def _previous_reports(session: InterviewSession, db: Session | None) -> list[dict[str, Any]]:
+    if db is None:
+        return []
+    previous = db.scalars(
+        select(InterviewSession)
+        .where(
+            InterviewSession.user_id == session.user_id,
+            InterviewSession.job_id == session.job_id,
+            InterviewSession.id != session.id,
+            InterviewSession.status == "completed",
+            InterviewSession.report_json.is_not(None),
+        )
+        .order_by(InterviewSession.completed_at.asc())
+    ).all()
+    reports: list[dict[str, Any]] = []
+    for prior in previous[-3:]:
+        report = _load(prior.report_json, {})
+        total_score = report.get("total_score")
+        if total_score is None:
+            continue
+        reports.append(
+            {
+                "session_id": prior.id,
+                "completed_at": prior.completed_at.isoformat() if prior.completed_at else None,
+                "total_score": total_score,
+                "question_count": report.get("question_count", 0),
+            }
+        )
+    return reports
+
+
+def _legacy_submit_answer(
+    session: InterviewSession,
+    current_turn: InterviewTurn,
+    answer_text: str,
+    db: Session,
+) -> None:
+    result = evaluate_interview_answer(current_turn, answer_text)
+    current_turn.answer_text = answer_text
+    current_turn.score = result["score"]
+    current_turn.feedback = result["feedback"]
+    current_turn.evidence_json = _dump(result["evidence"])
+    current_turn.status = "answered"
+    current_turn.answered_at = datetime.now(UTC)
+    if not current_turn.is_followup:
+        session.main_questions_answered += 1
+
+    next_turn = route_next_interview_turn(session, current_turn, db)
+    if next_turn is None:
+        session.status = "completed"
+        session.completed_at = datetime.now(UTC)
+        session.report_json = _dump(build_interview_report(session, db=db))
+        _move_job_application_status(session.job, "REVIEWED", only_from={"INTERVIEWING"})
+    else:
+        db.add(next_turn)

@@ -15,6 +15,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -270,7 +271,10 @@ def vector_literal(vector: list[float] | None) -> str | None:
     return "[" + ",".join(f"{value:.8g}" for value in vector) + "]"
 
 
-def import_to_postgres(items: list[QuestionItem], embeddings: dict[str, list[float]] | None) -> None:
+def import_to_postgres(
+    items: list[QuestionItem],
+    embeddings: dict[str, list[float]] | None,
+) -> None:
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise RuntimeError("缺少 DATABASE_URL，无法写入 PostgreSQL")
@@ -283,72 +287,53 @@ def import_to_postgres(items: list[QuestionItem], embeddings: dict[str, list[flo
     create_sql = """
     CREATE EXTENSION IF NOT EXISTS vector;
 
-    CREATE TABLE IF NOT EXISTS question_bank_items (
-      external_id TEXT PRIMARY KEY,
-      locale TEXT NOT NULL,
-      domain TEXT NOT NULL,
-      question_type TEXT NOT NULL,
-      difficulty TEXT NOT NULL,
-      skill_tags JSONB NOT NULL,
-      question_text TEXT NOT NULL,
-      reference_answer TEXT NOT NULL,
-      scoring_rubric JSONB NOT NULL,
-      followup_suggestions JSONB NOT NULL,
-      embedding_text TEXT NOT NULL,
-      source JSONB NOT NULL,
-      version INTEGER NOT NULL,
-      content_hash TEXT NOT NULL,
-      embedding vector,
-      embedding_model TEXT,
-      source_file TEXT NOT NULL,
-      source_line INTEGER NOT NULL,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_question_bank_domain ON question_bank_items (domain);
-    CREATE INDEX IF NOT EXISTS idx_question_bank_type ON question_bank_items (question_type);
-    CREATE INDEX IF NOT EXISTS idx_question_bank_skill_tags
-      ON question_bank_items USING GIN (skill_tags);
+    CREATE INDEX IF NOT EXISTS ix_question_bank_domain ON question_bank_items (domain);
+    CREATE INDEX IF NOT EXISTS ix_question_bank_type ON question_bank_items (question_type);
+    CREATE INDEX IF NOT EXISTS ix_question_bank_items_embedding_vector
+      ON question_bank_items USING hnsw (embedding_vector vector_cosine_ops);
     """
 
     upsert_sql = """
     INSERT INTO question_bank_items (
+      id,
       external_id,
       locale,
       domain,
       question_type,
       difficulty,
-      skill_tags,
+      skill_tags_json,
       question_text,
       reference_answer,
-      scoring_rubric,
-      followup_suggestions,
+      scoring_rubric_json,
+      followup_suggestions_json,
       embedding_text,
-      source,
+      source_json,
       version,
       content_hash,
       embedding,
+      embedding_vector,
       embedding_model,
       source_file,
       source_line
     )
     VALUES (
+      %(id)s,
       %(external_id)s,
       %(locale)s,
       %(domain)s,
       %(question_type)s,
       %(difficulty)s,
-      %(skill_tags)s::jsonb,
+      %(skill_tags_json)s,
       %(question_text)s,
       %(reference_answer)s,
-      %(scoring_rubric)s::jsonb,
-      %(followup_suggestions)s::jsonb,
+      %(scoring_rubric_json)s,
+      %(followup_suggestions_json)s,
       %(embedding_text)s,
-      %(source)s::jsonb,
+      %(source_json)s,
       %(version)s,
       %(content_hash)s,
-      %(embedding)s::vector,
+      %(embedding)s,
+      %(embedding_vector)s::vector,
       %(embedding_model)s,
       %(source_file)s,
       %(source_line)s
@@ -358,16 +343,17 @@ def import_to_postgres(items: list[QuestionItem], embeddings: dict[str, list[flo
       domain = EXCLUDED.domain,
       question_type = EXCLUDED.question_type,
       difficulty = EXCLUDED.difficulty,
-      skill_tags = EXCLUDED.skill_tags,
+      skill_tags_json = EXCLUDED.skill_tags_json,
       question_text = EXCLUDED.question_text,
       reference_answer = EXCLUDED.reference_answer,
-      scoring_rubric = EXCLUDED.scoring_rubric,
-      followup_suggestions = EXCLUDED.followup_suggestions,
+      scoring_rubric_json = EXCLUDED.scoring_rubric_json,
+      followup_suggestions_json = EXCLUDED.followup_suggestions_json,
       embedding_text = EXCLUDED.embedding_text,
-      source = EXCLUDED.source,
+      source_json = EXCLUDED.source_json,
       version = EXCLUDED.version,
       content_hash = EXCLUDED.content_hash,
       embedding = EXCLUDED.embedding,
+      embedding_vector = EXCLUDED.embedding_vector,
       embedding_model = EXCLUDED.embedding_model,
       source_file = EXCLUDED.source_file,
       source_line = EXCLUDED.source_line,
@@ -379,23 +365,28 @@ def import_to_postgres(items: list[QuestionItem], embeddings: dict[str, list[flo
     for item in items:
         data = item.data
         item_id = data["id"]
+        vector = (embeddings or {}).get(item_id)
         rows.append(
             {
+                "id": str(uuid.uuid4()),
                 "external_id": item_id,
                 "locale": data["locale"],
                 "domain": data["domain"],
                 "question_type": data["question_type"],
                 "difficulty": data["difficulty"],
-                "skill_tags": json.dumps(data["skill_tags"], ensure_ascii=False),
+                "skill_tags_json": json.dumps(data["skill_tags"], ensure_ascii=False),
                 "question_text": data["question_text"],
                 "reference_answer": data["reference_answer"],
-                "scoring_rubric": json.dumps(data["scoring_rubric"], ensure_ascii=False),
-                "followup_suggestions": json.dumps(data["followup_suggestions"], ensure_ascii=False),
+                "scoring_rubric_json": json.dumps(data["scoring_rubric"], ensure_ascii=False),
+                "followup_suggestions_json": json.dumps(
+                    data["followup_suggestions"], ensure_ascii=False
+                ),
                 "embedding_text": data["embedding_text"],
-                "source": json.dumps(data["source"], ensure_ascii=False),
+                "source_json": json.dumps(data["source"], ensure_ascii=False),
                 "version": data["version"],
                 "content_hash": item.content_hash,
-                "embedding": vector_literal((embeddings or {}).get(item_id)),
+                "embedding": json.dumps(vector, ensure_ascii=False) if vector else None,
+                "embedding_vector": vector_literal(vector),
                 "embedding_model": embedding_model,
                 "source_file": str(item.path.relative_to(PROJECT_ROOT)),
                 "source_line": item.line_no,

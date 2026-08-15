@@ -6,7 +6,20 @@ AI 求职工作台，本地优先开发。第一版目标是跑通：
 注册登录 -> 上传简历 -> 配置 AI -> Boss 扩展采集 -> 岗位评测 -> 岗位池 -> 模拟面试 RAG -> 报告
 ```
 
-当前阶段：`V0.3 岗位池和 Boss 采集稳定性` 已完成，包含岗位池状态流转、投递跟进信息、筛选、采集幂等、双重去重和异常状态安全失败。
+当前阶段：`V0.4 模拟面试增强` 已完成，包含 89 题多方向题库、pgvector 语义检索、LangGraph 面试状态机和 PostgreSQL checkpoint、技能维度评分与同岗位历史报告对比。
+
+## V0.4 模拟面试增强
+
+- 题库：`knowledge/interview_question_bank/seeds/` 按方向拆分 7 个 JSONL 种子文件（Agent、Agent 开发实习、RAG、LangChain、LLM 工程、LLM 工具调用、Python 后端），共 99 题，每题含参考答案、评分 Rubric、追问建议和来源。
+- 检索：`question_bank_items.embedding_vector vector(1024)` 存储 embedding；配置 `.env` 的 `EMBEDDING_API_KEY`/`EMBEDDING_BASE_URL`/`EMBEDDING_MODEL` 后使用 `pgvector-sql-v1` 真实语义检索，未配置时自动回退本地哈希 embedding（`pgvector-fallback-v1`）或关键词检索（`local-keyword-v1`）。
+- 面试流程：LangGraph `StateGraph` 节点链（加载上下文 -> 分析目标 -> 检索题库 -> 制定计划 -> 选题 -> 提问 -> 等待回答 -> 评分 -> 路由），支持追问、下一题、主动结束和达到上限结束，终止条件全部由代码控制。
+- Checkpoint：PostgreSQL 使用 `langgraph-postgres-checkpoint-v1`（`PostgresSaver`），SQLite/本地使用 `langgraph-memory-checkpoint-v1`（`InMemorySaver`）；`thread_id` 使用面试会话 ID，中断后可通过同一会话恢复。
+- 报告：`langgraph-report-v1`，包含技能维度评分、事实依据与推测性评价区分、逐题证据（题库引用 + 回答引用 + 评分依据）和同岗位历史报告对比。
+- 导入题库（可选生成真实 embedding）：
+
+```powershell
+D:\python3.12\python.exe scripts\import_question_bank.py --write-db --with-embeddings
+```
 
 ## 本地依赖
 
@@ -92,6 +105,7 @@ npm exec vite -- build --outDir ../tmp/frontend-build-v01 --emptyOutDir false
 
 ```powershell
 python scripts/import_question_bank.py
+python scripts/import_question_bank.py --write-db --with-embeddings
 ```
 
 也可以一次执行 M0 可用检查：
