@@ -24,3 +24,7 @@ knowledge/interview_question_bank/imports/processed/*.candidates*
 # IDE 本地配置
 .idea/
 
+# 内部工作文档（不入库）
+开发要求书.md
+开发计划.md
+开发遇到的问题.md
