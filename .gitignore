@@ -25,6 +25,9 @@ knowledge/interview_question_bank/imports/processed/*.candidates*
 .idea/
 
 # 内部工作文档（不入库）
+docs/
+REQUIREMENTS.md
 开发要求书.md
 开发计划.md
 开发遇到的问题.md
+agent-upgrade-implementation
