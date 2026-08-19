@@ -22,10 +22,12 @@ import {
 } from "antd";
 import { Bot, BriefcaseBusiness, FileText, History, LogOut, MessageSquareText, Search, Settings, ShieldCheck, Trash2, UploadCloud, UserRound } from "lucide-react";
 
+import InterviewChat from "./components/InterviewChat";
+
 const { Header, Content } = Layout;
 const { Title, Paragraph, Text } = Typography;
 
-const API_BASE = "http://127.0.0.1:18000/api/v1";
+export const API_BASE = "http://127.0.0.1:18000/api/v1";
 const APPLICATION_STATUS_OPTIONS = [
   { value: "NEW", label: "待处理" },
   { value: "SCORED", label: "已评测" },
@@ -269,7 +271,7 @@ interface InterviewTurn {
   question_bank_item_external_id?: string;
 }
 
-interface InterviewSession {
+export interface InterviewSession {
   id: string;
   job_id: string;
   job_title: string;
@@ -2210,26 +2212,14 @@ export function App() {
                       </Space>
                     </div>
 
-                    {activeInterview.current_turn && activeInterview.status === "running" && (
-                      <div className="current-question">
-                        <Space wrap className="question-tags">
-                          <Tag color={activeInterview.current_turn.is_followup ? "orange" : "purple"}>
-                            {activeInterview.current_turn.is_followup ? "追问" : "主问题"}
-                          </Tag>
-                          {activeInterview.current_turn.skill_tags.map((tag) => (
-                            <Tag key={tag}>{tag}</Tag>
-                          ))}
-                        </Space>
-                        <Title level={4}>{activeInterview.current_turn.question_text}</Title>
-                        <Form form={interviewAnswerForm} layout="vertical" onFinish={submitInterviewAnswer}>
-                          <Form.Item name="answer_text" rules={[{ required: true, message: "请输入你的回答" }]}>
-                            <Input.TextArea rows={6} placeholder="写下你的回答，尽量包含项目证据、实现步骤和边界说明。" />
-                          </Form.Item>
-                          <Button type="primary" htmlType="submit" loading={answerSubmitting}>
-                            提交回答
-                          </Button>
-                        </Form>
-                      </div>
+                    {activeInterview.status === "running" && (
+                      <InterviewChat
+                        session={activeInterview}
+                        token={token}
+                        onSessionUpdate={setActiveInterview}
+                        onFinish={finishInterview}
+                        finishLoading={answerSubmitting}
+                      />
                     )}
 
                     <List

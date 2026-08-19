@@ -34,8 +34,20 @@ def test_interview_runs_from_job_pool_to_report(client: TestClient) -> None:
     assert session["job_id"] == job_id
     assert session["status"] == "running"
     assert session["retrieval_mode"] == "pgvector-fallback-v1"
-    assert session["current_turn"]["question_text"]
-    assert session["current_turn"]["question_bank_item_external_id"]
+    assert session["current_turn"]["question_type"] == "opening"
+    assert "自我介绍" in session["current_turn"]["question_text"]
+    assert session["current_turn"]["question_bank_item_external_id"] is None
+
+    intro = client.post(
+        f"/api/v1/interviews/{session['id']}/answers",
+        headers=headers,
+        json={"answer_text": "我主要做后端和检索模块，负责过 FastAPI、pgvector 和 LangGraph。"},
+    )
+    assert intro.status_code == 200, intro.text
+    after_intro = intro.json()
+    assert after_intro["turns"][0]["question_type"] == "opening"
+    assert after_intro["turns"][0]["score"] is None
+    assert after_intro["current_turn"]["turn_index"] == 2
 
     first_answer = client.post(
         f"/api/v1/interviews/{session['id']}/answers",
@@ -49,8 +61,8 @@ def test_interview_runs_from_job_pool_to_report(client: TestClient) -> None:
     )
     assert first_answer.status_code == 200, first_answer.text
     after_first = first_answer.json()
-    assert after_first["turns"][0]["score"] is not None
-    assert after_first["turns"][0]["evidence"]
+    assert after_first["turns"][1]["score"] is not None
+    assert after_first["turns"][1]["evidence"]
     assert after_first["current_turn"] is not None
 
     second_answer = client.post(
@@ -64,7 +76,17 @@ def test_interview_runs_from_job_pool_to_report(client: TestClient) -> None:
         },
     )
     assert second_answer.status_code == 200, second_answer.text
-    completed = second_answer.json()
+    after_second = second_answer.json()
+    assert after_second["status"] == "running"
+    assert after_second["current_turn"]["question_type"] == "closing"
+
+    final_answer = client.post(
+        f"/api/v1/interviews/{session['id']}/answers",
+        headers=headers,
+        json={"answer_text": "我想了解团队对项目质量、成长空间和协作方式的要求。"},
+    )
+    assert final_answer.status_code == 200, final_answer.text
+    completed = final_answer.json()
     assert completed["status"] == "completed"
     assert completed["report"]["total_score"] > 0
     assert completed["report"]["evidence"]
@@ -95,6 +117,13 @@ def test_interview_can_follow_up_on_weak_answer(client: TestClient) -> None:
         headers=headers,
         json={"job_id": job_id, "max_questions": 2},
     ).json()
+    intro = client.post(
+        f"/api/v1/interviews/{start['id']}/answers",
+        headers=headers,
+        json={"answer_text": "我主要负责后端接口、检索和数据处理。"},
+    )
+    assert intro.status_code == 200, intro.text
+
     response = client.post(
         f"/api/v1/interviews/{start['id']}/answers",
         headers=headers,
@@ -105,7 +134,7 @@ def test_interview_can_follow_up_on_weak_answer(client: TestClient) -> None:
     body = response.json()
     assert body["status"] == "running"
     assert body["current_turn"]["is_followup"] is True
-    assert body["turns"][0]["score"] < 60
+    assert body["turns"][1]["score"] < 60
 
 
 def test_interview_history_omits_sessions_without_answers(client: TestClient) -> None:
@@ -187,12 +216,24 @@ def test_interview_history_can_be_deleted_in_batch(client: TestClient) -> None:
             headers=headers,
             json={"job_id": job_id, "max_questions": 1},
         ).json()
+        intro = client.post(
+            f"/api/v1/interviews/{start['id']}/answers",
+            headers=headers,
+            json={"answer_text": f"第 {index} 次自我介绍，包含后端和检索经历。"},
+        )
+        assert intro.status_code == 200, intro.text
         answer = client.post(
             f"/api/v1/interviews/{start['id']}/answers",
             headers=headers,
             json={"answer_text": f"第 {index} 次回答，包含检索、评分、证据和 LangGraph。"},
         )
         assert answer.status_code == 200, answer.text
+        closing = client.post(
+            f"/api/v1/interviews/{start['id']}/answers",
+            headers=headers,
+            json={"answer_text": f"第 {index} 次反问，想了解团队更看重什么。"},
+        )
+        assert closing.status_code == 200, closing.text
         session_ids.append(start["id"])
 
     history = client.get("/api/v1/interviews/history", headers=headers)

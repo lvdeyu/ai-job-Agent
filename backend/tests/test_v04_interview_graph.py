@@ -125,7 +125,7 @@ def test_interview_graph_route_next_step_unit_rules() -> None:
         "question_count": 3,
         "interview_plan": {"must_cover_skills": []},
     }
-    assert route_next_step(reached_max)["next_step"] == "finish"
+    assert route_next_step(reached_max)["next_step"] == "wrap_up"
 
     loop_protection = {
         "main_question_count": 2,
@@ -154,19 +154,30 @@ def test_interview_graph_weak_answer_followup_then_finish(client: TestClient) ->
     assert first["status"] == "running"
     assert first["checkpoint"]["mode"].startswith("langgraph-")
     assert first["checkpoint"]["resume_session_id"] == first["id"]
+    assert first["turns"][0]["question_type"] == "opening"
     assert first["turns"][0]["status"] == "asked"
+
+    intro = _answer(client, headers, first["id"], "我主要负责后端和检索模块。")
+    assert intro["status"] == "running"
+    assert intro["turns"][0]["status"] == "answered"
+    assert intro["turns"][0]["score"] is None
+    assert intro["current_turn"]["turn_index"] == 2
 
     weak = _answer(client, headers, first["id"], WEAK_ANSWER)
     assert weak["status"] == "running"
     assert weak["current_turn"]["is_followup"] is True
     assert weak["current_turn"]["followup_depth"] == 1
-    assert weak["turns"][0]["score"] < 60
+    assert weak["turns"][1]["score"] < 60
 
     second = _answer(client, headers, first["id"], "还是没有说到点上。")
-    assert second["status"] == "completed"
-    assert second["main_questions_answered"] == 1
-    assert second["report"]["total_score"] is not None
-    assert second["report"]["question_count"] == 2
+    assert second["status"] == "running"
+    assert second["current_turn"]["question_type"] == "closing"
+
+    third = _answer(client, headers, first["id"], "我想问一下团队更看重哪类候选人。")
+    assert third["status"] == "completed"
+    assert third["main_questions_answered"] == 1
+    assert third["report"]["total_score"] is not None
+    assert third["report"]["question_count"] == 2
 
 
 def test_interview_graph_checkpoint_resume_and_active_finish(client: TestClient) -> None:
@@ -176,11 +187,15 @@ def test_interview_graph_checkpoint_resume_and_active_finish(client: TestClient)
     job_id = _create_pool_job(client, token)
 
     session = _start_interview(client, headers, job_id, max_questions=3)
+    intro = _answer(client, headers, session["id"], "我做过后端、检索和数据处理。")
+    assert intro["status"] == "running"
+    assert intro["turns"][0]["score"] is None
+
     after_first = _answer(client, headers, session["id"], GOOD_ANSWER)
     assert after_first["status"] == "running"
-    assert after_first["turns"][0]["score"] >= 70
+    assert after_first["turns"][1]["score"] >= 70
     assert after_first["current_turn"]["is_followup"] is False
-    assert after_first["current_turn"]["turn_index"] == 2
+    assert after_first["current_turn"]["turn_index"] == 3
 
     finish = client.post(f"/api/v1/interviews/{session['id']}/finish", headers=headers)
     assert finish.status_code == 200, finish.text
@@ -199,14 +214,20 @@ def test_interview_report_has_v04_dimensions_and_previous_reports(client: TestCl
     job_id = _create_pool_job(client, token)
 
     first = _start_interview(client, headers, job_id, max_questions=1)
+    _answer(client, headers, first["id"], "我主要负责后端和检索。")
     first_completed = _answer(client, headers, first["id"], GOOD_ANSWER)
-    assert first_completed["status"] == "completed"
+    assert first_completed["status"] == "running"
+    first_finished = _answer(client, headers, first["id"], "我想问团队更重视什么。")
+    assert first_finished["status"] == "completed"
 
     second = _start_interview(client, headers, job_id, max_questions=1)
+    _answer(client, headers, second["id"], "我主要负责后端和检索。")
     second_completed = _answer(client, headers, second["id"], GOOD_ANSWER)
-    assert second_completed["status"] == "completed"
+    assert second_completed["status"] == "running"
+    second_finished = _answer(client, headers, second["id"], "我想问团队更重视什么。")
+    assert second_finished["status"] == "completed"
 
-    report = second_completed["report"]
+    report = second_finished["report"]
     assert report["report_version"] == "langgraph-report-v1"
     assert report["skill_dimensions"]
     assert all(
@@ -217,7 +238,7 @@ def test_interview_report_has_v04_dimensions_and_previous_reports(client: TestCl
     assert isinstance(report["inference_notes"], list)
     assert len(report["previous_reports"]) == 1
     previous = report["previous_reports"][0]
-    assert previous["session_id"] == first_completed["id"]
+    assert previous["session_id"] == first_finished["id"]
     assert previous["total_score"] is not None
     assert previous["question_count"] == 1
 
@@ -270,12 +291,15 @@ def test_interview_retrieval_differs_between_agent_and_rag_jobs(client: TestClie
         resume_version_id=rag_resume_id,
     )
 
-    agent_first = agent_session["current_turn"]
-    rag_first = rag_session["current_turn"]
+    agent_intro = _answer(client, headers, agent_session["id"], "我做过 Agent 和工具调用相关项目。")
+    rag_intro = _answer(client, headers, rag_session["id"], "我做过向量检索和 RAG 相关项目。")
+
+    agent_first = agent_intro["current_turn"]
+    rag_first = rag_intro["current_turn"]
     assert agent_first["question_bank_item_external_id"]
     assert rag_first["question_bank_item_external_id"]
-    agent_tags = set(agent_session["turns"][0]["skill_tags"])
-    rag_tags = set(rag_session["turns"][0]["skill_tags"])
+    agent_tags = set(agent_intro["turns"][1]["skill_tags"])
+    rag_tags = set(rag_intro["turns"][1]["skill_tags"])
     assert agent_first["question_bank_item_external_id"] != rag_first[
         "question_bank_item_external_id"
     ] or agent_tags != rag_tags

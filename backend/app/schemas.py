@@ -332,6 +332,31 @@ class SubmitInterviewAnswerRequest(BaseModel):
     answer_text: str = Field(min_length=1, max_length=8000)
 
 
+class ChatMessageRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=8000)
+
+
+class InterviewMessageResponse(BaseModel):
+    id: str
+    role: str
+    content: str
+    phase: str | None = None
+    turn_id: str | None = None
+    token_count: int
+    created_at: datetime
+
+
+class AgentEventResponse(BaseModel):
+    id: str
+    event_type: str
+    node_name: str | None = None
+    detail_json: str
+    duration_ms: float | None = None
+    token_count: int | None = None
+    error: str | None = None
+    created_at: datetime
+
+
 class InterviewTurnResponse(BaseModel):
     id: str
     turn_index: int

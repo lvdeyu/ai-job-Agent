@@ -6,7 +6,17 @@ AI 求职工作台，本地优先开发。第一版目标是跑通：
 注册登录 -> 上传简历 -> 配置 AI -> Boss 扩展采集 -> 岗位评测 -> 岗位池 -> 模拟面试 RAG -> 报告
 ```
 
-当前阶段：`V0.4 模拟面试增强` 已完成，包含 89 题多方向题库、pgvector 语义检索、LangGraph 面试状态机和 PostgreSQL checkpoint、技能维度评分与同岗位历史报告对比。
+当前阶段：`V0.5 Agent 化升级（对话式面试 Agent）` 开发中，已完成 LLM 服务层、SSE 对话端点、对话式面试页、白名单工具、长期记忆与过程还原；未配置模型时自动降级到 V0.4 规则面试。
+
+## V0.5 对话式面试 Agent
+
+- 对话页：`frontend/src/components/InterviewChat.tsx` 提供气泡式面试界面，支持阶段指示、流式事件和刷新恢复。
+- 对话端点：`POST /api/v1/interviews/{id}/chat`（SSE 事件流），`GET /api/v1/interviews/{id}/messages` 恢复对话，`GET /api/v1/interviews/{id}/events` 查看过程还原。
+- LLM 网关：`backend/app/services/llm/` 支持 OpenAI 兼容（openai/deepseek/tongyi）和 Claude，含结构化输出、工具调用、流式与失败降级。
+- 白名单工具：检索题库、读取岗位上下文、读取简历项目、确定性评分，均由代码执行，LLM 只负责决策。
+- LLM-as-judge：评分后由模型补充语义解释与证据点评，最终分数仍由确定性评分决定，保证可复现。
+- 记忆与观测：对话消息、长期强弱项记忆和 `agent_event_logs` 过程日志落库。
+- 配置方式：在“基础配置 -> AI 模型配置”保存真实模型后开始面试即进入 HR 对话模式；未配置时使用规则面试降级路径。
 
 ## V0.4 模拟面试增强
 

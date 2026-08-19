@@ -12,7 +12,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.config import settings
 from app.db.base import Base
-from app.db.session import get_db
+from app.db.session import get_db, get_session_factory
 from app.main import create_app
 
 
@@ -38,6 +38,7 @@ def client() -> Generator[TestClient, None, None]:
 
         app = create_app()
         app.dependency_overrides[get_db] = override_get_db
+        app.dependency_overrides[get_session_factory] = lambda: TestingSessionLocal
         with TestClient(app) as test_client:
             yield test_client
         settings.resume_storage_dir = old_resume_dir

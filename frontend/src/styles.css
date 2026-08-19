@@ -380,6 +380,147 @@ body {
   width: 100%;
 }
 
+.interview-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  min-height: 420px;
+  border: 1px solid #dbeafe;
+  border-radius: 12px;
+  background: #f8fbff;
+  padding: 12px;
+}
+
+.chat-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.chat-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1 1 auto;
+  max-height: 52vh;
+  overflow-y: auto;
+  padding: 4px 2px;
+}
+
+.chat-message {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.chat-message.user {
+  flex-direction: row-reverse;
+}
+
+.chat-avatar {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: #eef2ff;
+  color: #4f46e5;
+}
+
+.chat-message.user .chat-avatar {
+  background: #ecfdf5;
+  color: #059669;
+}
+
+.chat-bubble {
+  max-width: 78%;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-message.user .chat-bubble {
+  background: #eef2ff;
+  border-color: #c7d2fe;
+}
+
+.chat-bubble .chat-streaming {
+  display: inline-block;
+  margin-left: 6px;
+  vertical-align: middle;
+  animation: chat-spin 1s linear infinite;
+  color: #6366f1;
+}
+
+.chat-thinking {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #64748b;
+}
+
+.chat-error {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #b91c1c;
+  font-size: 13px;
+}
+
+.chat-replay {
+  flex: 0 0 auto;
+  padding: 8px 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.chat-replay-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.chat-replay-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: #f8fafc;
+  font-size: 12px;
+}
+
+.chat-composer {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  flex: 0 0 auto;
+}
+
+.chat-composer .ant-input {
+  flex: 1 1 auto;
+}
+
+@keyframes chat-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .interview-history-list {
   margin-bottom: 12px;
 }

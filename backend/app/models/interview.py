@@ -84,6 +84,12 @@ class InterviewSession(Base):
         cascade="all, delete-orphan",
         order_by="InterviewTurn.created_at",
     )
+    messages = relationship(
+        "InterviewMessage",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        order_by="InterviewMessage.created_at",
+    )
 
 
 class InterviewTurn(Base):

@@ -16,6 +16,8 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models import InterviewSession, InterviewTurn, QuestionBankItem
 from app.services.interview import (
+    CLOSING_QUESTION_TYPE,
+    OPENING_QUESTION_TYPE,
     SCORING_MODE,
     _contains_casefold,
     _load,
@@ -68,6 +70,7 @@ class InterviewState(TypedDict, total=False):
     retrieval_mode: str
     scoring_mode: str
     retrieval_filters: list[dict[str, Any]]
+    closing_completed: bool
 
 
 SKILL_VOCABULARY = [
@@ -204,6 +207,25 @@ def build_interview_plan(state: InterviewState) -> dict[str, Any]:
 
 
 def select_question(state: InterviewState) -> dict[str, Any]:
+    if state.get("question_count", 0) == 0:
+        title = state.get("job_snapshot", {}).get("title") or "这个岗位"
+        return {
+            "current_question": {
+                "id": None,
+                "question_text": f"欢迎来到本场模拟面试。先请你做一个 1 分钟左右的自我介绍，重点说说你和 {title} 的匹配点。",
+                "question_type": OPENING_QUESTION_TYPE,
+                "difficulty": "easy",
+                "skill_tags": [],
+                "reference_answer": "",
+                "scoring_rubric": [],
+                "followup_suggestions": [],
+                "is_followup": False,
+                "followup_depth": 0,
+                "source": {"kind": "opening"},
+                "retrieval_rank": -1,
+            },
+            "decision_summary": "模拟面试开场并引导自我介绍",
+        }
     asked_ids = {
         question.get("id")
         for question in state.get("question_history", [])
@@ -292,6 +314,37 @@ def evaluate_answer(state: InterviewState) -> dict[str, Any]:
     turn = db.get(InterviewTurn, last_turn_id)
     if turn is None:
         raise RuntimeError(f"interview turn {last_turn_id} not found")
+    if turn.question_type == OPENING_QUESTION_TYPE:
+        turn.answer_text = state.get("user_answer") or ""
+        turn.score = None
+        turn.feedback = "已记录自我介绍"
+        turn.evidence_json = json.dumps([], ensure_ascii=False)
+        turn.status = "answered"
+        turn.answered_at = datetime.now(UTC)
+        db.flush()
+        return {
+            "has_followup": False,
+            "followup_depth": 0,
+            "last_score": 0.0,
+            "main_question_count": state.get("main_question_count", 0),
+            "status": "running",
+        }
+    if turn.question_type == CLOSING_QUESTION_TYPE:
+        turn.answer_text = state.get("user_answer") or ""
+        turn.score = None
+        turn.feedback = "已记录用户反问"
+        turn.evidence_json = json.dumps([], ensure_ascii=False)
+        turn.status = "answered"
+        turn.answered_at = datetime.now(UTC)
+        db.flush()
+        return {
+            "closing_completed": True,
+            "has_followup": False,
+            "followup_depth": 0,
+            "last_score": 0.0,
+            "main_question_count": state.get("main_question_count", 0),
+            "status": "running",
+        }
     result = evaluate_interview_answer(turn, state.get("user_answer") or "")
     turn.answer_text = state.get("user_answer") or ""
     turn.score = result["score"]
@@ -321,7 +374,11 @@ def evaluate_answer(state: InterviewState) -> dict[str, Any]:
 def route_next_step(state: InterviewState) -> dict[str, Any]:
     if state.get("user_action") == "finish":
         decision = "finish"
+    elif state.get("closing_completed"):
+        decision = "finish"
     elif state.get("error"):
+        decision = "finish"
+    elif state.get("question_count", 0) > state.get("max_questions", 8) * 3:
         decision = "finish"
     elif (
         state.get("last_score", 0) < 70
@@ -336,15 +393,13 @@ def route_next_step(state: InterviewState) -> dict[str, Any]:
         main_count = state.get("main_question_count", 0)
         max_questions = state.get("max_questions", 8)
         if main_count >= max_questions:
-            decision = "finish"
+            decision = "wrap_up"
         elif (
             main_count >= MIN_MAIN_QUESTIONS_BEFORE_EARLY_FINISH
             and must_cover
             and all(skill in covered for skill in must_cover)
         ):
-            decision = "finish"
-        elif state.get("question_count", 0) >= max_questions * 3:
-            decision = "finish"
+            decision = "wrap_up"
         else:
             decision = "next_question"
     return {"next_step": decision}
@@ -352,6 +407,60 @@ def route_next_step(state: InterviewState) -> dict[str, Any]:
 
 def _route_after_evaluate(state: InterviewState) -> str:
     return state.get("next_step") or "next_question"
+
+
+def ask_closing(state: InterviewState) -> dict[str, Any]:
+    db = _db()
+    interview = db.get(InterviewSession, state["session_id"])
+    if interview is None:
+        raise RuntimeError(f"interview session {state['session_id']} not found")
+    next_index = max((turn.turn_index for turn in interview.turns), default=0) + 1
+    question = {
+        "id": None,
+        "question_text": "今天的面试先到这里，最后想请你反问我一个问题，你最想了解什么？",
+        "question_type": CLOSING_QUESTION_TYPE,
+        "difficulty": "easy",
+        "skill_tags": [],
+        "reference_answer": "",
+        "scoring_rubric": [],
+        "followup_suggestions": [],
+        "is_followup": False,
+        "followup_depth": 0,
+        "source": {"kind": "closing"},
+        "retrieval_rank": -1,
+    }
+    turn = InterviewTurn(
+        session_id=state["session_id"],
+        user_id=state["user_id"],
+        question_bank_item_id=None,
+        turn_index=next_index,
+        question_text=question["question_text"],
+        question_type=question["question_type"],
+        skill_tags_json=json.dumps([], ensure_ascii=False),
+        reference_answer_snapshot="",
+        scoring_rubric_json="[]",
+        followup_suggestions_json="[]",
+        is_followup=False,
+        followup_depth=0,
+        status="asked",
+    )
+    db.add(turn)
+    db.flush()
+    history = list(state.get("question_history") or [])
+    history.append(
+        {
+            "id": None,
+            "turn_id": turn.id,
+            "question_text": question["question_text"],
+        }
+    )
+    return {
+        "current_question": question,
+        "question_history": history,
+        "question_count": next_index,
+        "last_turn_id": turn.id,
+        "status": "running",
+    }
 
 
 def ask_followup(state: InterviewState) -> dict[str, Any]:
@@ -448,6 +557,7 @@ def _build_graph() -> StateGraph:
     graph.add_node("evaluate_answer", evaluate_answer)
     graph.add_node("route_next_step", route_next_step)
     graph.add_node("ask_followup", ask_followup)
+    graph.add_node("ask_closing", ask_closing)
     graph.add_node("generate_interview_report", generate_interview_report)
     graph.add_node("persist_report", persist_report)
 
@@ -466,10 +576,12 @@ def _build_graph() -> StateGraph:
         {
             "follow_up": "ask_followup",
             "next_question": "select_question",
+            "wrap_up": "ask_closing",
             "finish": "generate_interview_report",
         },
     )
     graph.add_edge("ask_followup", "wait_for_user_answer")
+    graph.add_edge("ask_closing", "wait_for_user_answer")
     graph.add_edge("generate_interview_report", "persist_report")
     graph.add_edge("persist_report", END)
     return graph

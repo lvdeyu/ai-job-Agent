@@ -27,6 +27,9 @@ QUESTION_BANK_SEED_DIR = PROJECT_ROOT / "knowledge" / "interview_question_bank" 
 RETRIEVAL_MODE = "local-keyword-v1"
 PGVECTOR_RETRIEVAL_MODE = "pgvector-sql-v1"
 SCORING_MODE = "local-rubric-v1"
+OPENING_QUESTION_TYPE = "opening"
+CLOSING_QUESTION_TYPE = "closing"
+SPECIAL_QUESTION_TYPES = {OPENING_QUESTION_TYPE, CLOSING_QUESTION_TYPE}
 
 
 def create_interview_session(
@@ -172,11 +175,31 @@ def current_open_turn(session: InterviewSession) -> InterviewTurn | None:
     return sorted(asked_turns, key=lambda turn: turn.turn_index)[-1]
 
 
+def _is_scoreable_turn(turn: InterviewTurn) -> bool:
+    return turn.question_type not in SPECIAL_QUESTION_TYPES
+
+
 def route_next_interview_turn(
     session: InterviewSession,
     answered_turn: InterviewTurn,
     db: Session,
 ) -> InterviewTurn | None:
+    if answered_turn.question_type == CLOSING_QUESTION_TYPE:
+        return None
+    if answered_turn.question_type == OPENING_QUESTION_TYPE:
+        asked_ids = {
+            turn.question_bank_item_id
+            for turn in session.turns
+            if turn.question_bank_item_id and not turn.is_followup
+        }
+        return select_next_question(
+            db=db,
+            job=session.job,
+            resume_version=session.resume_version,
+            evaluation=session.job_evaluation,
+            asked_question_bank_item_ids=asked_ids,
+        )
+
     followups = _load(answered_turn.followup_suggestions_json, [])
     should_follow_up = (
         not answered_turn.is_followup
@@ -205,7 +228,29 @@ def route_next_interview_turn(
         )
 
     if session.main_questions_answered >= session.max_questions:
-        return None
+        closing_turn = next(
+            (turn for turn in session.turns if turn.question_type == CLOSING_QUESTION_TYPE),
+            None,
+        )
+        if closing_turn is not None and closing_turn.status == "asked":
+            return None
+        next_index = max((turn.turn_index for turn in session.turns), default=0) + 1
+        return InterviewTurn(
+            session_id=session.id,
+            user_id=session.user_id,
+            question_bank_item_id=None,
+            parent_turn_id=answered_turn.id,
+            turn_index=next_index,
+            question_text="感谢你的回答，最后想请你反问我一个问题，你最想了解什么？",
+            question_type=CLOSING_QUESTION_TYPE,
+            skill_tags_json="[]",
+            reference_answer_snapshot="",
+            scoring_rubric_json="[]",
+            followup_suggestions_json="[]",
+            is_followup=False,
+            followup_depth=0,
+            status="asked",
+        )
 
     asked_ids = {
         turn.question_bank_item_id
@@ -368,7 +413,9 @@ def build_interview_report(
     session: InterviewSession,
     db: Session | None = None,
 ) -> dict[str, Any]:
-    answered_turns = [turn for turn in session.turns if turn.status == "answered"]
+    answered_turns = [
+        turn for turn in session.turns if turn.status == "answered" and _is_scoreable_turn(turn)
+    ]
     scores = [float(turn.score or 0) for turn in answered_turns]
     total_score = round(sum(scores) / len(scores), 1) if scores else 0.0
 
@@ -825,14 +872,24 @@ def _legacy_submit_answer(
     answer_text: str,
     db: Session,
 ) -> None:
-    result = evaluate_interview_answer(current_turn, answer_text)
     current_turn.answer_text = answer_text
-    current_turn.score = result["score"]
-    current_turn.feedback = result["feedback"]
-    current_turn.evidence_json = _dump(result["evidence"])
     current_turn.status = "answered"
     current_turn.answered_at = datetime.now(UTC)
-    if not current_turn.is_followup:
+    if current_turn.question_type == OPENING_QUESTION_TYPE:
+        current_turn.score = None
+        current_turn.feedback = "已记录自我介绍。"
+        current_turn.evidence_json = _dump([])
+    elif current_turn.question_type == CLOSING_QUESTION_TYPE:
+        current_turn.score = None
+        current_turn.feedback = "已记录用户反问。"
+        current_turn.evidence_json = _dump([])
+    else:
+        result = evaluate_interview_answer(current_turn, answer_text)
+        current_turn.score = result["score"]
+        current_turn.feedback = result["feedback"]
+        current_turn.evidence_json = _dump(result["evidence"])
+
+    if not current_turn.is_followup and current_turn.question_type not in SPECIAL_QUESTION_TYPES:
         session.main_questions_answered += 1
 
     next_turn = route_next_interview_turn(session, current_turn, db)
